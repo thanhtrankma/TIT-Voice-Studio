@@ -1,0 +1,72 @@
+@import '@fontsource/be-vietnam-pro/400.css';
+@import '@fontsource/be-vietnam-pro/500.css';
+@import '@fontsource/be-vietnam-pro/600.css';
+@import '@fontsource/be-vietnam-pro/700.css';
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Be Vietnam Pro', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --color-brand-50: #fff4f1;
+  --color-brand-100: #ffe4dc;
+  --color-brand-200: #ffc7b8;
+  --color-brand-400: #ff7a5c;
+  --color-brand-500: #ff5a4e;
+  --color-brand-600: #ef3f45;
+  --color-brand-700: #c92a3a;
+  --color-ink: #17171c;
+  --color-muted: #6b6b76;
+  --color-line: #ececf0;
+  --color-canvas: #f7f7f9;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.btn-brand {
+  background-image: linear-gradient(135deg, #ff7a45 0%, #ff5a4e 45%, #ff3d6e 100%);
+  box-shadow: 0 8px 20px -8px rgb(255 77 79 / 0.65);
+}
+
+/* Ô soạn thảo Tiptap */
+.tiptap {
+  outline: none;
+  min-height: 100%;
+  font-size: 1.0625rem;
+  line-height: 1.85;
+}
+.tiptap p {
+  margin: 0 0 0.6em;
+}
+.tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: #a3a3ad;
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+input[type='range'].speed {
+  accent-color: var(--color-brand-500);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #dcdce2;
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}

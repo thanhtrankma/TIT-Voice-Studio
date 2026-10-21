@@ -1,0 +1,14 @@
+[project]
+name = "tit-voice-studio-backend"
+version = "0.1.0"
+description = "Backend FastAPI chạy VieNeu-TTS cho TIT Voice Studio"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.156.8",
+    "python-multipart>=0.0.32",
+    "uvicorn[standard]>=0.54.0",
+    "vieneu>=3.8.3",
+]
+
+[tool.uv]
+package = false
