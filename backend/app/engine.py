@@ -23,6 +23,7 @@ from .config import DATA_DIR, HISTORY_DIR, PRECISION, VOICES_FILE
 log = logging.getLogger("tit.engine")
 
 SAMPLE_RATE = 48_000
+TARGET_LUFS = -16
 PREVIEW_DIR = DATA_DIR / "previews"
 PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 PREVIEW_TEXT = "Xin chào, đây là giọng đọc của tôi. Rất vui được đồng hành cùng bạn hôm nay."
@@ -177,7 +178,7 @@ class Engine:
         audio = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
         if abs(speed - 1.0) > 0.01:
             audio = change_speed(audio, speed)
-        return audio
+        return normalize_loudness(audio)
 
     def preview_path(self, voice: str) -> Path:
         return PREVIEW_DIR / f"{_safe(voice)}.wav"
@@ -195,6 +196,33 @@ def change_speed(audio: np.ndarray, speed: float) -> np.ndarray:
         input=audio.astype(np.float32).tobytes(), capture_output=True, check=True,
     )
     return np.frombuffer(proc.stdout, dtype=np.float32)
+
+
+def _ffmpeg_f32(audio: np.ndarray, filt: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-i", "pipe:0",
+         "-filter:a", filt, "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"],
+        input=audio.astype(np.float32).tobytes(), capture_output=True, check=True,
+    )
+
+
+def normalize_loudness(audio: np.ndarray) -> np.ndarray:
+    """Đưa độ to về TARGET_LUFS (chuẩn EBU R128, hai lượt, tăng giảm tuyến tính).
+
+    Mô hình ra khoảng -19.5 LUFS, nhỏ hơn hẳn các nền tảng online (~-15). Bản quá ngắn
+    (dưới 0.4 giây) không đo được nên giữ nguyên.
+    """
+    if len(audio) < SAMPLE_RATE * 0.4:
+        return audio
+    target = f"I={TARGET_LUFS}:TP=-1.5:LRA=11"
+    log_text = _ffmpeg_f32(audio, f"loudnorm={target}:print_format=json").stderr.decode()
+    measured = json.loads(log_text[log_text.rindex("{"):log_text.rindex("}") + 1])
+    if measured["input_i"] in ("-inf", "inf"):
+        return audio
+    second = (f"loudnorm={target}:linear=true:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+              f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
+              f":offset={measured['target_offset']}")
+    return np.frombuffer(_ffmpeg_f32(audio, second).stdout, dtype=np.float32)
 
 
 def write_wav(audio: np.ndarray, path: Path) -> float:

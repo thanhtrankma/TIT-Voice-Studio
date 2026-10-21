@@ -1,5 +1,5 @@
 import { Loader2, Mic, RotateCcw, ShieldCheck, Square, Trash2 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, waitForJob, type Voice } from '../api'
 import { formatTime } from '../components/AudioPlayer'
 import { PreviewButton, VoiceAvatar } from '../components/VoiceLibrary'
@@ -21,7 +21,11 @@ export default function ClonePage({ voices, consentSentence, ready, onChange }: 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const custom = voices.filter((v) => v.custom)
-  const blobUrl = blob ? URL.createObjectURL(blob) : null
+  const blobUrl = useMemo(() => (blob ? URL.createObjectURL(blob) : null), [blob])
+
+  useEffect(() => () => {
+    if (blobUrl) URL.revokeObjectURL(blobUrl)
+  }, [blobUrl])
 
   useEffect(() => () => stopTimer(), [])
 
@@ -59,7 +63,7 @@ export default function ClonePage({ voices, consentSentence, ready, onChange }: 
 
   function stop() {
     stopTimer()
-    recorder.current?.state === 'recording' && recorder.current.stop()
+    if (recorder.current?.state === 'recording') recorder.current.stop()
     setRecording(false)
   }
 

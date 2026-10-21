@@ -1,4 +1,5 @@
 import logging
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Dict, Optional
@@ -93,14 +94,25 @@ async def clone_voice(
         raise HTTPException(409, "Tên giọng đã tồn tại.")
 
     tmp = Path(tempfile.mkdtemp())
-    src = tmp / (audio.filename or "rec.webm")
+    src = tmp / f"upload{Path(audio.filename or 'rec.webm').suffix}"
     src.write_bytes(await audio.read())
-    wav = eng.to_wav_48k(src, tmp / "ref.wav")
-    seconds = sf.info(str(wav)).duration
+    try:
+        wav = eng.to_wav_48k(src, tmp / "reference.wav")
+        seconds = sf.info(str(wav)).duration
+    except Exception:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise HTTPException(400, "Không đọc được file ghi âm.")
     if not 3 <= seconds <= 20:
+        shutil.rmtree(tmp, ignore_errors=True)
         raise HTTPException(400, f"Bản thu cần dài 3–20 giây (hiện {seconds:.1f} giây).")
 
-    job = engine.submit("clone", lambda job: engine.clone_voice(name, wav, gender))
+    def run(job):
+        try:
+            return engine.clone_voice(name, wav, gender)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    job = engine.submit("clone", run)
     return {"job_id": job.id}
 
 

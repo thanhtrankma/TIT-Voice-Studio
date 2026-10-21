@@ -63,10 +63,20 @@ Hoặc build giao diện một lần (`cd frontend && npm run build`) rồi ch�
 
 Tài liệu đầy đủ: http://localhost:8765/docs.
 
+## Kiểm thử
+
+```bash
+cd backend && uv run pytest
+```
+
+Bộ kiểm thử chạy mô hình thật (khoảng 30–60 giây), ghi dữ liệu vào thư mục tạm, không đụng vào lịch sử của bạn.
+
 ## Ghi chú kỹ thuật
 
 onnxruntime ≥ 1.31 từ chối file `.data` của mô hình khi nằm trong cache Hugging Face (symlink tới các blob
 khác nhau). `backend/app/model_files.py` tải mô hình về thư mục riêng để tránh lỗi này.
+
+Mô hình ra khoảng -19.5 LUFS; backend chuẩn hoá mọi bản về -16 LUFS, đỉnh -1.5 dBFS.
 
 ## Sử dụng có trách nhiệm
 
