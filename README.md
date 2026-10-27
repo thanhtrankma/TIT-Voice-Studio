@@ -17,6 +17,8 @@ Công cụ chuyển văn bản tiếng Việt thành giọng nói, chạy hoàn 
   Mặc định dùng giọng tiếng Anh bản xứ (Kokoro-82M, 10 giọng Mỹ/Anh) và tô sáng theo mốc thời gian thật của từng từ;
   vẫn chọn được giọng VieNeu. Model Kokoro (~192 MB) tự tải ở lần dùng đầu.
   Xem [docs/shadowing-video.md](docs/shadowing-video.md).
+- **Đăng YouTube** ngay từ bài luyện: tiêu đề, mô tả (kèm mục lục theo câu và lời thoại) điền sẵn, chọn Riêng tư /
+  Không công khai / Công khai hoặc hẹn giờ công khai, ảnh bìa tự tạo, nhiều tài khoản. Xem mục *Kết nối YouTube* bên dưới.
 
 ## Cài đặt
 
@@ -70,9 +72,34 @@ Hoặc build giao diện một lần (`cd frontend && npm run build`) rồi ch�
 | `POST` | `/api/shadow` | `{text, voice, title, repeats, slow_speed, gap_factor, full_run, aspect}` → `job_id`; `voice` là giọng VieNeu hoặc `kokoro:*` |
 | `GET` | `/api/shadow` | Danh sách bài luyện |
 | `GET` | `/api/shadow/{id}/video\|audio\|srt\|timeline` | File của bài luyện |
+| `GET` | `/api/youtube` | Đã có OAuth client chưa, các tài khoản, trạng thái đăng nhập |
+| `POST` | `/api/youtube/client-secret` | Nạp file OAuth client (form: `file`) |
+| `POST` | `/api/youtube/login` | Mở trang đăng nhập Google trên máy chạy backend |
+| `PUT` `DELETE` | `/api/youtube/accounts/{id}[/active]` | Chọn hoặc gỡ tài khoản |
+| `GET` | `/api/shadow/{id}/youtube` | Nội dung gợi ý để đăng và các lần đã đăng |
+| `POST` | `/api/shadow/{id}/youtube` | `{title, description, tags, privacy, publish_at?, account?}` → `job_id` |
 | `DELETE` | `/api/shadow/{id}` | Xoá bài luyện |
 
 Tài liệu đầy đủ: http://localhost:8765/docs.
+
+## Kết nối YouTube
+
+Làm một lần (cách làm giống pianotube; dùng lại được OAuth client của pianotube):
+
+1. [Google Cloud Console](https://console.cloud.google.com/): tạo project, bật **YouTube Data API v3**.
+2. **OAuth consent screen**: chọn External, thêm email của bạn vào Test users, rồi bấm **Publish app**
+   (để token không hết hạn sau 7 ngày).
+3. **Credentials → OAuth client ID → Desktop app**, tải file JSON về.
+4. Trong tab Luyện Shadowing, mở một bài → **Đăng YouTube** → chọn file JSON đó → **Kết nối tài khoản YouTube**.
+   Trình duyệt mở trang đăng nhập Google; cấp quyền tải video lên. Đăng nhập được nhiều tài khoản.
+
+File OAuth client và token nằm trong `backend/data/youtube/` (không đưa lên git).
+
+- Project chưa qua [kiểm duyệt YouTube API](https://support.google.com/youtube/contact/yt_api_form) thì video đăng qua
+  API **bị khoá ở chế độ Riêng tư**. Gửi form kiểm duyệt (miễn phí, mất vài tuần) để đăng công khai và hẹn giờ.
+- Mỗi lần đăng tốn khoảng 1.600 trên 10.000 đơn vị quota mỗi ngày của project.
+- Video được khai báo `containsSyntheticMedia` (giọng đọc AI), danh mục Giáo dục.
+- Ảnh bìa tuỳ chỉnh cần kênh đã xác minh số điện thoại; chưa xác minh thì video vẫn đăng, chỉ báo chưa đặt được ảnh bìa.
 
 ## Kiểm thử
 

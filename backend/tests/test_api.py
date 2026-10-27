@@ -253,3 +253,55 @@ def test_shadow_lesson_with_native_voice(client):
         preview = client.get("/api/english/voices/kokoro:bf_emma/preview")
     assert preview.headers["content-type"] == "audio/wav" and len(preview.content) > 50_000
     assert client.delete(f"/api/shadow/{item['id']}").status_code == 200
+
+
+def test_youtube_publish_flow(client, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta
+
+    from app import shadow, store, youtube
+
+    for name, value in [("YT_DIR", tmp_path), ("CLIENT_SECRETS", tmp_path / "client_secret.json"),
+                        ("TOKENS_DIR", tmp_path / "tokens"), ("ACCOUNTS_FILE", tmp_path / "accounts.json")]:
+        monkeypatch.setattr(youtube, name, value)
+    tone = (0.3 * np.sin(np.linspace(0, 2 * np.pi * 330, 48_000))).astype(np.float32)
+    shadow.build("abcdef0000cc", [shadow.Line("See you soon.", "Hẹn gặp lại.")], [tone],
+                 shadow.Settings(voice="Thử"), lambda p: None)
+    store.add_shadow("abcdef0000cc", "Bài YouTube", "Thử", 1, 20.0, "16:9")
+
+    data = client.get("/api/shadow/abcdef0000cc/youtube").json()
+    assert data["draft"]["title"] == "Bài YouTube | Luyện nói tiếng Anh Shadowing" and data["uploads"] == []
+    assert "See you soon." in data["draft"]["description"]
+    assert client.get("/api/shadow/nothere0000/youtube").status_code == 404
+
+    body = {"title": "Bài YouTube", "description": "Mô tả", "tags": ["a", " "], "privacy": "unlisted"}
+    assert client.post("/api/shadow/abcdef0000cc/youtube", json=body).status_code == 400   # chưa kết nối
+    assert client.post("/api/youtube/login").status_code == 400                              # chưa có client secret
+    bad = client.post("/api/youtube/client-secret", files={"file": ("c.json", b'{"web": {}}')})
+    assert bad.status_code == 400
+    ok = client.post("/api/youtube/client-secret", files={"file": ("c.json", b'{"installed": {}}')})
+    assert ok.json()["client_secret"] is True
+    youtube._save_accounts({"active": "acc", "accounts": {"acc": {"label": "me@example.com"}}})
+
+    assert client.post("/api/shadow/abcdef0000cc/youtube", json={**body, "title": "a < b"}).status_code == 400
+    soon = (datetime.now() + timedelta(minutes=5)).isoformat()
+    assert client.post("/api/shadow/abcdef0000cc/youtube", json={**body, "publish_at": soon}).status_code == 400
+    assert client.post("/api/shadow/abcdef0000cc/youtube", json={**body, "account": "zz"}).status_code == 404
+
+    seen = {}
+
+    def fake_upload(lesson, title, description, tags, privacy, publish_at, account_id, on_progress):
+        seen.update(title=title, tags=tags, privacy=privacy, publish_at=publish_at, lesson=lesson["id"])
+        on_progress(1.0)
+        return {"video_id": "VIDabc", "url": "https://youtu.be/VIDabc", "title": title, "privacy": "private",
+                "publish_at": youtube.to_utc(publish_at), "account": "me@example.com", "note": None}
+
+    monkeypatch.setattr(youtube, "upload", fake_upload)
+    later = (datetime.now() + timedelta(days=1)).replace(microsecond=0).isoformat()   # giờ máy, không múi giờ
+    r = client.post("/api/shadow/abcdef0000cc/youtube", json={**body, "publish_at": later})
+    job = wait_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job["error"]
+    assert seen["tags"] == ["a"] and seen["lesson"] == "abcdef0000cc" and seen["publish_at"].tzinfo is not None
+    assert job["result"]["url"] == "https://youtu.be/VIDabc"
+    lesson = next(s for s in client.get("/api/shadow").json() if s["id"] == "abcdef0000cc")
+    assert lesson["youtube_url"] == "https://youtu.be/VIDabc"
+    assert client.get("/api/shadow/abcdef0000cc/youtube").json()["uploads"][0]["video_id"] == "VIDabc"

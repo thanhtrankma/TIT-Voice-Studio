@@ -45,7 +45,31 @@ export type ShadowLesson = {
   lines: number
   duration: number
   aspect: '16:9' | '9:16'
+  /** Lần đăng YouTube gần nhất, nếu có. */
+  youtube_url?: string | null
 }
+
+export type YouTubeStatus = {
+  client_secret: boolean
+  accounts: { id: string; label: string }[]
+  active: string
+  login: { state: 'idle' | 'waiting' | 'error'; error: string | null }
+}
+
+export type YouTubePrivacy = 'private' | 'unlisted' | 'public'
+
+export type YouTubeUpload = {
+  video_id: string
+  url: string
+  title: string
+  privacy: YouTubePrivacy
+  publish_at: string | null
+  account: string
+  uploaded: number
+  note?: string | null
+}
+
+export type YouTubeDraft = { title: string; description: string; tags: string[] }
 
 export type ShadowRequest = {
   text: string
@@ -108,6 +132,21 @@ export const api = {
   shadow: (body: ShadowRequest) => request<{ job_id: string; lines: number }>('/api/shadow', json(body)),
   shadowLessons: () => request<ShadowLesson[]>('/api/shadow'),
   deleteShadow: (id: string) => request(`/api/shadow/${id}`, { method: 'DELETE' }),
+  youtube: () => request<YouTubeStatus>('/api/youtube'),
+  youtubeClientSecret: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<YouTubeStatus>('/api/youtube/client-secret', { method: 'POST', body: form })
+  },
+  youtubeLogin: () => request<YouTubeStatus>('/api/youtube/login', { method: 'POST' }),
+  youtubeSetActive: (id: string) =>
+    request<YouTubeStatus>(`/api/youtube/accounts/${encodeURIComponent(id)}/active`, { method: 'PUT' }),
+  shadowYoutube: (id: string) =>
+    request<{ draft: YouTubeDraft; uploads: YouTubeUpload[] }>(`/api/shadow/${id}/youtube`),
+  publishShadow: (
+    id: string,
+    body: YouTubeDraft & { privacy: YouTubePrivacy; publish_at: string | null; account: string | null },
+  ) => request<{ job_id: string }>(`/api/shadow/${id}/youtube`, json(body)),
 }
 
 export const shadowUrl = (id: string, kind: 'video' | 'audio' | 'srt' | 'timeline', download = false) =>

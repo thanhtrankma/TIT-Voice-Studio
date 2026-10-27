@@ -1,8 +1,10 @@
-import { Captions, Clapperboard, Download, Eraser, Film, Loader2, Music, Trash2 } from 'lucide-react'
+import { Captions, Clapperboard, Download, Eraser, ExternalLink, Film, Loader2, Music, Trash2, Upload } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { api, shadowUrl, waitForJob, type EnglishStatus, type ShadowLesson, type ShadowRequest, type Voice } from '../api'
 import { formatTime } from '../components/AudioPlayer'
+import Segmented from '../components/Segmented'
 import VoiceLibrary, { VoiceAvatar } from '../components/VoiceLibrary'
+import YouTubePublish from '../components/YouTubePublish'
 
 const SAMPLES: { label: string; title: string; text: string }[] = [
   {
@@ -100,6 +102,7 @@ export default function ShadowPage({ voices, ready }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [lessons, setLessons] = useState<ShadowLesson[]>([])
   const [current, setCurrent] = useState<ShadowLesson | null>(null)
+  const [publishing, setPublishing] = useState(false)
 
   const list = source === 'native' ? (english?.voices ?? []) : voices
   const selectedVoice = list.find((v) => v.id === voice) ?? list.find((v) => v.id === DEFAULT_VOICE[source]) ?? list[0]
@@ -125,13 +128,23 @@ export default function ShadowPage({ voices, ready }: Props) {
         setStage(j.stage)
       })
       setLessons((l) => [lesson, ...l])
-      setCurrent(lesson)
+      open(lesson)
       if (source === 'native' && !english?.installed) api.english().then(setEnglish).catch(() => {})
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setBusy(false)
     }
+  }
+
+  function open(lesson: ShadowLesson) {
+    setCurrent(lesson)
+    setPublishing(false)
+  }
+
+  function published(id: string, url: string) {
+    setLessons((l) => l.map((x) => (x.id === id ? { ...x, youtube_url: url } : x)))
+    setCurrent((c) => (c?.id === id ? { ...c, youtube_url: url } : c))
   }
 
   async function remove(id: string) {
@@ -312,11 +325,25 @@ export default function ShadowPage({ voices, ready }: Props) {
                   <DownloadLink href={shadowUrl(current.id, 'video', true)} icon={Film} label="Tải video MP4" primary />
                   <DownloadLink href={shadowUrl(current.id, 'audio', true)} icon={Music} label="Tải MP3 (chỉ tiếng)" />
                   <DownloadLink href={shadowUrl(current.id, 'srt', true)} icon={Captions} label="Tải phụ đề SRT" />
+                  <button
+                    onClick={() => setPublishing((p) => !p)}
+                    className={`inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition ${
+                      publishing ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-line text-ink hover:border-zinc-300 hover:bg-canvas'
+                    }`}
+                  >
+                    <Upload size={16} /> Đăng YouTube
+                  </button>
                 </div>
                 <p className="text-xs leading-relaxed text-muted">
                   Video có ghi “Giọng đọc AI”. Khi đăng công khai, hãy giữ dòng này.
                 </p>
               </div>
+            </div>
+          )}
+
+          {current && publishing && (
+            <div className="border-t border-line pt-4">
+              <YouTubePublish key={current.id} lesson={current} onPublished={(url) => published(current.id, url)} />
             </div>
           )}
 
@@ -327,7 +354,7 @@ export default function ShadowPage({ voices, ready }: Props) {
                 {lessons.map((l) => (
                   <div key={l.id} className="flex items-center gap-3 py-2.5">
                     <button
-                      onClick={() => setCurrent(l)}
+                      onClick={() => open(l)}
                       className={`min-w-0 flex-1 text-left ${current?.id === l.id ? 'text-brand-600' : 'hover:text-brand-600'}`}
                     >
                       <div className="truncate text-sm font-medium">{l.title}</div>
@@ -335,6 +362,18 @@ export default function ShadowPage({ voices, ready }: Props) {
                         {new Date(l.created * 1000).toLocaleString('vi-VN')} · {lessonMeta(l)}
                       </div>
                     </button>
+                    {l.youtube_url && (
+                      <a
+                        href={l.youtube_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded-lg p-2 text-muted hover:bg-canvas hover:text-ink"
+                        aria-label="Xem trên YouTube"
+                        title="Xem trên YouTube"
+                      >
+                        <ExternalLink size={16} />
+                      </a>
+                    )}
                     <a
                       href={shadowUrl(l.id, 'video', true)}
                       className="rounded-lg p-2 text-muted hover:bg-canvas hover:text-ink"
@@ -373,32 +412,6 @@ function Field({ label, hint, children }: { label: string; hint?: React.ReactNod
         {hint}
       </div>
       {children}
-    </div>
-  )
-}
-
-function Segmented<T extends string | number>({
-  options,
-  value,
-  onChange,
-}: {
-  options: { value: T; label: string }[]
-  value: T
-  onChange: (v: T) => void
-}) {
-  return (
-    <div className="flex rounded-full bg-canvas p-1">
-      {options.map((o) => (
-        <button
-          key={String(o.value)}
-          onClick={() => onChange(o.value)}
-          className={`flex-1 rounded-full px-3 py-1 text-xs font-medium transition ${
-            value === o.value ? 'bg-white text-ink shadow-sm' : 'text-muted hover:text-ink'
-          }`}
-        >
-          {o.label}
-        </button>
-      ))}
     </div>
   )
 }

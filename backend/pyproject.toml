@@ -5,6 +5,8 @@ description = "Backend FastAPI chạy VieNeu-TTS cho TIT Voice Studio"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.156.8",
+    "google-api-python-client>=2.201.0",
+    "google-auth-oauthlib>=1.5.0",
     "kokoro-onnx>=0.6.1",
     "python-multipart>=0.0.32",
     "uvicorn[standard]>=0.54.0",

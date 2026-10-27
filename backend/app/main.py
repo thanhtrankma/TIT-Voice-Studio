@@ -1,8 +1,10 @@
+import json
 import logging
 import shutil
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 import soundfile as sf
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -11,7 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import engine as eng, english, shadow, store, text as textproc
+from . import engine as eng, english, shadow, store, text as textproc, youtube
 from .config import PRECISION, ROOT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -278,6 +280,113 @@ def list_shadow():
     return store.list_shadow()
 
 
+@app.delete("/api/shadow/{item_id}")
+def delete_shadow(item_id: str):
+    if not store.get_shadow(item_id):
+        raise HTTPException(404, "Không tìm thấy bài luyện.")
+    store.delete_shadow(item_id)
+    shutil.rmtree(shadow.lesson_dir(item_id), ignore_errors=True)
+    return {"ok": True}
+
+
+# ── đăng YouTube ───────────────────────────────────────────────────────────
+@app.get("/api/youtube")
+def youtube_status():
+    return youtube.status()
+
+
+@app.post("/api/youtube/client-secret")
+async def youtube_client_secret(file: UploadFile = File(...)):
+    try:
+        youtube.save_client_secret(await file.read())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return youtube.status()
+
+
+@app.post("/api/youtube/login")
+def youtube_login():
+    """Mở trang đăng nhập Google trên máy chạy backend; giao diện hỏi lại /api/youtube."""
+    try:
+        youtube.start_login()
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e))
+    return youtube.status()
+
+
+@app.put("/api/youtube/accounts/{account_id}/active")
+def youtube_set_active(account_id: str):
+    try:
+        youtube.set_active(account_id)
+    except KeyError:
+        raise HTTPException(404, "Không có tài khoản này.")
+    return youtube.status()
+
+
+@app.delete("/api/youtube/accounts/{account_id}")
+def youtube_remove(account_id: str):
+    try:
+        youtube.remove_account(account_id)
+    except KeyError:
+        raise HTTPException(404, "Không có tài khoản này.")
+    return youtube.status()
+
+
+def _lesson(item_id: str) -> tuple:
+    lesson = store.get_shadow(item_id)
+    path = shadow.lesson_dir(item_id) / "timeline.json" if lesson else None
+    if not lesson or not path.exists():
+        raise HTTPException(404, "Không tìm thấy bài luyện.")
+    return lesson, json.loads(path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/shadow/{item_id}/youtube")
+def shadow_youtube(item_id: str):
+    """Nội dung gợi ý để đăng, kèm các lần đã đăng bài này."""
+    lesson, timeline = _lesson(item_id)
+    return {"draft": youtube.draft(lesson, timeline), "uploads": store.list_youtube(item_id)}
+
+
+class PublishRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=100)
+    description: str = Field("", max_length=5000)
+    tags: List[str] = []
+    privacy: Literal["private", "unlisted", "public"] = "private"
+    publish_at: Optional[datetime] = None
+    account: Optional[str] = None
+
+
+@app.post("/api/shadow/{item_id}/youtube")
+def publish_shadow(item_id: str, req: PublishRequest):
+    lesson, _ = _lesson(item_id)
+    if "<" in req.title + req.description or ">" in req.title + req.description:
+        raise HTTPException(400, "YouTube không nhận ký tự < và > trong tiêu đề và mô tả.")
+    publish_at = req.publish_at
+    if publish_at:
+        publish_at = publish_at if publish_at.tzinfo else publish_at.astimezone()   # không ghi múi giờ: giờ máy
+        if publish_at < datetime.now().astimezone() + timedelta(minutes=15):
+            raise HTTPException(400, "Giờ công khai phải sau lúc này ít nhất 15 phút.")
+    status = youtube.status()
+    if not status["client_secret"] or not status["accounts"]:
+        raise HTTPException(400, "Chưa kết nối tài khoản YouTube.")
+    if req.account and req.account not in {a["id"] for a in status["accounts"]}:
+        raise HTTPException(404, "Không có tài khoản này.")
+    tags = [t.strip() for t in req.tags if t.strip()]
+
+    def run(job):
+        def progress(p):
+            job.progress = p
+        rec = youtube.upload(lesson, req.title.strip(), req.description, tags, req.privacy, publish_at,
+                             req.account, progress)
+        row = store.add_youtube(item_id, rec["video_id"], rec["url"], rec["title"], rec["privacy"],
+                                rec["publish_at"], rec["account"])
+        return {**row, "note": rec["note"]}
+
+    job = engine.submit_io("youtube", run)
+    return {"job_id": job.id}
+
+
+# Khai báo sau các route /api/shadow/{id}/youtube để không bắt nhầm chúng.
 @app.get("/api/shadow/{item_id}/{kind}")
 def shadow_file(item_id: str, kind: str, download: bool = False):
     if kind not in SHADOW_FILES:
@@ -287,15 +396,6 @@ def shadow_file(item_id: str, kind: str, download: bool = False):
         raise HTTPException(404, "Không tìm thấy bài luyện.")
     filename = f"tit-shadowing-{item_id}{path.suffix}" if download else None
     return FileResponse(path, media_type=media, filename=filename)
-
-
-@app.delete("/api/shadow/{item_id}")
-def delete_shadow(item_id: str):
-    if not store.get_shadow(item_id):
-        raise HTTPException(404, "Không tìm thấy bài luyện.")
-    store.delete_shadow(item_id)
-    shutil.rmtree(shadow.lesson_dir(item_id), ignore_errors=True)
-    return {"ok": True}
 
 
 # ── từ điển phát âm ────────────────────────────────────────────────────────

@@ -2,7 +2,8 @@
 
 Mô hình ONNX không an toàn khi gọi song song, nên mọi việc (tạo giọng, nghe thử,
 nhân bản) đi qua một hàng đợi duy nhất. API chỉ tạo job rồi trả về ngay.
-Phần việc không cần mô hình (dựng video) chạy tiếp ở một luồng riêng để hàng đợi đi tiếp.
+Phần việc không cần mô hình (dựng video) chạy tiếp ở một luồng riêng để hàng đợi đi tiếp;
+việc mạng chạy lâu (đăng YouTube) có luồng riêng nữa để không giữ chân việc dựng.
 """
 import json
 import logging
@@ -53,6 +54,7 @@ class Engine:
         self.jobs: Dict[str, Job] = {}
         self._queue: "queue.Queue[tuple[Job, Callable[[Job], Any], Optional[Callable[[Job, Any], dict]]]]" = queue.Queue()
         self._post = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
+        self._io = ThreadPoolExecutor(max_workers=1, thread_name_prefix="upload")
         self._custom: Dict[str, dict] = {}
         threading.Thread(target=self._run, daemon=True, name="tts-worker").start()
 
@@ -100,9 +102,24 @@ class Engine:
 
     def submit(self, kind: str, fn: Callable[[Job], Any], then: Optional[Callable[[Job, Any], dict]] = None) -> Job:
         """`then` (nếu có) nhận kết quả của `fn` và chạy ở luồng dựng, không giữ luồng mô hình."""
+        job = self._new_job(kind)
+        self._queue.put((job, fn, then))
+        return job
+
+    def submit_io(self, kind: str, fn: Callable[[Job], Any]) -> Job:
+        """Việc không cần mô hình mà chờ mạng lâu (đăng YouTube): chạy lần lượt ở luồng riêng."""
+        job = self._new_job(kind)
+
+        def run() -> None:
+            job.status = "running"
+            self._finish(job, fn)
+
+        self._io.submit(run)
+        return job
+
+    def _new_job(self, kind: str) -> Job:
         job = Job(id=uuid.uuid4().hex[:12], kind=kind)
         self.jobs[job.id] = job
-        self._queue.put((job, fn, then))
         self._prune_jobs()
         return job
 
