@@ -12,9 +12,13 @@ const GENDERS = [
   { id: 'male', label: 'Nam' },
 ]
 const REGIONS = [
-  { id: 'north', label: 'Bắc' },
-  { id: 'central', label: 'Trung' },
-  { id: 'south', label: 'Nam' },
+  { id: 'north', label: 'Giọng Bắc' },
+  { id: 'central', label: 'Giọng Trung' },
+  { id: 'south', label: 'Giọng Nam' },
+]
+const ACCENTS = [
+  { id: 'us', label: 'Giọng Mỹ' },
+  { id: 'uk', label: 'Giọng Anh' },
 ]
 
 export function VoiceAvatar({ name, size = 44 }: { name: string; size?: number }) {
@@ -28,7 +32,7 @@ export function VoiceAvatar({ name, size = 44 }: { name: string; size?: number }
   )
 }
 
-export function PreviewButton({ voice, className = '' }: { voice: string; className?: string }) {
+export function PreviewButton({ voice, name = voice, className = '' }: { voice: string; name?: string; className?: string }) {
   const preview = usePreview()
   const active = preview.voice === voice
   return (
@@ -41,7 +45,7 @@ export function PreviewButton({ voice, className = '' }: { voice: string; classN
       className={`grid size-9 shrink-0 place-items-center rounded-full border transition ${
         active ? 'border-brand-500 bg-brand-500 text-white' : 'border-line bg-white text-ink hover:border-brand-400 hover:text-brand-600'
       } ${className}`}
-      aria-label={active ? `Dừng nghe ${voice}` : `Nghe thử ${voice}`}
+      aria-label={active ? `Dừng nghe ${name}` : `Nghe thử ${name}`}
       title={active ? 'Dừng' : 'Nghe thử'}
     >
       {active && preview.loading ? (
@@ -60,12 +64,16 @@ export default function VoiceLibrary({ voices, selected, onSelect }: Props) {
   const [gender, setGender] = useState('all')
   const [region, setRegion] = useState<string | null>(null)
 
+  // Giọng tiếng Anh bản xứ lọc theo giọng Mỹ/Anh thay cho vùng miền.
+  const native = voices.some((v) => v.accent)
+  const chips = native ? ACCENTS : REGIONS
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     return voices.filter(
       (v) =>
         (gender === 'all' || v.gender === gender) &&
-        (!region || v.region === region) &&
+        (!region || (v.accent ?? v.region) === region) &&
         (!q || `${v.name} ${v.description}`.toLowerCase().includes(q)),
     )
   }, [voices, query, gender, region])
@@ -96,7 +104,7 @@ export default function VoiceLibrary({ voices, selected, onSelect }: Props) {
               </button>
             ))}
           </div>
-          {REGIONS.map((r) => (
+          {chips.map((r) => (
             <button
               key={r.id}
               onClick={() => setRegion(region === r.id ? null : r.id)}
@@ -104,7 +112,7 @@ export default function VoiceLibrary({ voices, selected, onSelect }: Props) {
                 region === r.id ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-line text-muted hover:text-ink'
               }`}
             >
-              Giọng {r.label}
+              {r.label}
             </button>
           ))}
         </div>
@@ -147,7 +155,7 @@ export default function VoiceLibrary({ voices, selected, onSelect }: Props) {
                   ))}
                 </div>
               </div>
-              <PreviewButton voice={v.id} />
+              <PreviewButton voice={v.id} name={v.name} />
             </div>
           )
         })}

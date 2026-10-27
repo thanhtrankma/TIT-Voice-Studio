@@ -14,6 +14,7 @@ os.environ.setdefault("TIT_MODELS_DIR", str(Path(__file__).resolve().parents[1] 
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app import english  # noqa: E402
 from app.main import app, engine  # noqa: E402
 
 VOICE = "Trúc Ly"
@@ -177,3 +178,78 @@ def test_output_is_loudness_normalized(client):
                          capture_output=True, text=True).stderr
     lufs = float(re.findall(r"I:\s+(-?[\d.]+) LUFS", log)[-1])
     assert -17.5 < lufs < -14.5
+
+
+@pytest.mark.parametrize(
+    "body,status",
+    [
+        ({"text": "  \n | chỉ có nghĩa", "voice": VOICE}, 400),
+        ({"text": "Hello.", "voice": "Không có"}, 404),
+        ({"text": "Hello.", "voice": "kokoro:zz_nobody"}, 404),
+        ({"text": "\n".join(["Hello there."] * 81), "voice": VOICE}, 400),
+        ({"text": "word " * 70, "voice": VOICE}, 400),
+        ({"text": "Hello.", "voice": VOICE, "aspect": "4:3"}, 422),
+    ],
+)
+def test_shadow_rejects_bad_input(client, body, status):
+    assert client.post("/api/shadow", json=body).status_code == status
+
+
+def test_shadow_lesson_end_to_end(client):
+    r = client.post("/api/shadow", json={
+        "text": "Good morning, how are you? | Chào buổi sáng, bạn khoẻ không?\nI'd rather have a cup of tea.",
+        "voice": "Adam", "title": "Bài QA", "slow_speed": 0.8,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["lines"] == 2
+    job = wait_job(client, r.json()["job_id"], timeout=300)
+    assert job["status"] == "done", job["error"]
+    item = job["result"]
+    assert item["title"] == "Bài QA" and item["lines"] == 2 and item["duration"] > 10
+    assert any(s["id"] == item["id"] for s in client.get("/api/shadow").json())
+
+    video = client.get(f"/api/shadow/{item['id']}/video")
+    assert video.status_code == 200 and video.headers["content-type"] == "video/mp4" and len(video.content) > 50_000
+    mp3 = client.get(f"/api/shadow/{item['id']}/audio?download=true")
+    assert mp3.headers["content-type"] == "audio/mpeg" and "attachment" in mp3.headers["content-disposition"]
+    timeline = client.get(f"/api/shadow/{item['id']}/timeline").json()
+    listens = [s for s in timeline["steps"] if s["kind"] == "listen"]
+    assert len(listens) == 2 and all(0.5 < s["duration"] < 6 for s in listens)
+    assert client.get(f"/api/shadow/{item['id']}/secret").status_code == 404
+
+    assert client.delete(f"/api/shadow/{item['id']}").status_code == 200
+    assert client.get(f"/api/shadow/{item['id']}/video").status_code == 404
+    assert client.delete("/api/shadow/nothere").status_code == 404
+    assert client.delete("/api/shadow/..%2Fhistory").status_code in (404, 405)
+
+
+def test_english_voices_listed(client):
+    data = client.get("/api/english").json()
+    assert len(data["voices"]) >= 8 and all(v["id"].startswith("kokoro:") for v in data["voices"])
+    assert client.get("/api/english/voices/kokoro:zz_nobody/preview").status_code == 404
+
+
+@pytest.mark.skipif(not english.installed(), reason="chưa tải model Kokoro")
+def test_shadow_lesson_with_native_voice(client):
+    r = client.post("/api/shadow", json={
+        "text": "The meeting starts at 3:30 p.m. | Cuộc họp bắt đầu lúc 3 giờ 30 chiều.\nPlease call me before 9 a.m.",
+        "voice": "kokoro:bf_emma", "slow_speed": 0.8, "full_run": False,
+    })
+    assert r.status_code == 200, r.text
+    job = wait_job(client, r.json()["job_id"], timeout=300)
+    assert job["status"] == "done", job["error"]
+    item = job["result"]
+    assert item["voice"] == "Emma (Anh)"
+    timeline = client.get(f"/api/shadow/{item['id']}/timeline").json()
+    assert timeline["word_timing"] == "measured" and timeline["settings"]["voice"] == "Emma (Anh)"
+    for st in timeline["steps"]:
+        if st["kind"] in ("listen", "slow"):
+            n = len(timeline["lines"][st["line"]]["en"].split())
+            assert len(st["words"]) == n and st["words"] == sorted(st["words"]) and st["words"][-1] < st["duration"]
+
+    preview = client.get("/api/english/voices/kokoro:bf_emma/preview")
+    if preview.headers["content-type"].startswith("application/json"):
+        assert wait_job(client, preview.json()["job_id"])["status"] == "done"
+        preview = client.get("/api/english/voices/kokoro:bf_emma/preview")
+    assert preview.headers["content-type"] == "audio/wav" and len(preview.content) > 50_000
+    assert client.delete(f"/api/shadow/{item['id']}").status_code == 200

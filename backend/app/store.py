@@ -1,4 +1,4 @@
-"""Lưu lịch sử (SQLite) và từ điển phát âm (JSON) trên máy."""
+"""Lưu lịch sử, bài luyện Shadowing (SQLite) và từ điển phát âm (JSON) trên máy."""
 import json
 import sqlite3
 import threading
@@ -31,6 +31,17 @@ def init() -> None:
                 chars INTEGER NOT NULL
             )"""
         )
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS shadow (
+                id TEXT PRIMARY KEY,
+                created REAL NOT NULL,
+                title TEXT NOT NULL,
+                voice TEXT NOT NULL,
+                lines INTEGER NOT NULL,
+                duration REAL NOT NULL,
+                aspect TEXT NOT NULL
+            )"""
+        )
 
 
 def add_history(item_id: str, text: str, voice: str, speed: float, duration: float, chars: int) -> dict:
@@ -58,6 +69,31 @@ def get_history(item_id: str) -> Optional[dict]:
 def delete_history(item_id: str) -> None:
     with _lock, _conn() as c:
         c.execute("DELETE FROM history WHERE id = ?", (item_id,))
+
+
+def add_shadow(item_id: str, title: str, voice: str, lines: int, duration: float, aspect: str) -> dict:
+    row = dict(id=item_id, created=time.time(), title=title, voice=voice,
+               lines=lines, duration=duration, aspect=aspect)
+    with _lock, _conn() as c:
+        c.execute("INSERT INTO shadow VALUES (:id, :created, :title, :voice, :lines, :duration, :aspect)", row)
+    return row
+
+
+def list_shadow(limit: int = 100) -> List[dict]:
+    with _lock, _conn() as c:
+        rows = c.execute("SELECT * FROM shadow ORDER BY created DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_shadow(item_id: str) -> Optional[dict]:
+    with _lock, _conn() as c:
+        r = c.execute("SELECT * FROM shadow WHERE id = ?", (item_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def delete_shadow(item_id: str) -> None:
+    with _lock, _conn() as c:
+        c.execute("DELETE FROM shadow WHERE id = ?", (item_id,))
 
 
 def load_dictionary() -> Dict[str, str]:

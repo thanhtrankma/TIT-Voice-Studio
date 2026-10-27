@@ -3,6 +3,8 @@ export type Voice = {
   name: string
   gender: 'male' | 'female' | string
   region: 'north' | 'central' | 'south' | null
+  /** Chỉ giọng tiếng Anh bản xứ (Kokoro) có: giọng Mỹ hay Anh. */
+  accent?: 'us' | 'uk'
   style: string
   description: string
   featured: boolean
@@ -19,6 +21,12 @@ export type Health = {
   consent_sentence: string
 }
 
+export type EnglishStatus = {
+  installed: boolean
+  download_mb: number
+  voices: Voice[]
+}
+
 export type HistoryItem = {
   id: string
   created: number
@@ -29,11 +37,33 @@ export type HistoryItem = {
   chars: number
 }
 
+export type ShadowLesson = {
+  id: string
+  created: number
+  title: string
+  voice: string
+  lines: number
+  duration: number
+  aspect: '16:9' | '9:16'
+}
+
+export type ShadowRequest = {
+  text: string
+  voice: string
+  title: string
+  repeats: number
+  slow_speed: number
+  gap_factor: number
+  full_run: boolean
+  aspect: '16:9' | '9:16'
+}
+
 export type Job<R = unknown> = {
   id: string
   kind: string
   status: 'queued' | 'running' | 'done' | 'error'
   progress: number
+  stage: string | null
   error: string | null
   result: R | null
   queue_position: number
@@ -74,12 +104,20 @@ export const api = {
     request<{ job_id: string }>('/api/voices/clone', { method: 'POST', body: form }),
   deleteVoice: (id: string) =>
     request(`/api/voices/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  english: () => request<EnglishStatus>('/api/english'),
+  shadow: (body: ShadowRequest) => request<{ job_id: string; lines: number }>('/api/shadow', json(body)),
+  shadowLessons: () => request<ShadowLesson[]>('/api/shadow'),
+  deleteShadow: (id: string) => request(`/api/shadow/${id}`, { method: 'DELETE' }),
 }
+
+export const shadowUrl = (id: string, kind: 'video' | 'audio' | 'srt' | 'timeline', download = false) =>
+  `/api/shadow/${id}/${kind}${download ? '?download=true' : ''}`
 
 export const audioUrl = (id: string, format: 'wav' | 'mp3' = 'wav', download = false) =>
   `/api/history/${id}/audio?format=${format}${download ? '&download=true' : ''}`
 
-export const previewUrl = (voice: string) => `/api/voices/${encodeURIComponent(voice)}/preview`
+export const previewUrl = (voice: string) =>
+  `/api/${voice.startsWith('kokoro:') ? 'english/' : ''}voices/${encodeURIComponent(voice)}/preview`
 
 /** Hỏi trạng thái job đến khi xong; gọi onProgress mỗi lần cập nhật. */
 export async function waitForJob<R>(id: string, onProgress?: (job: Job<R>) => void): Promise<R> {

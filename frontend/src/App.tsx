@@ -1,13 +1,14 @@
-import { AudioLines, BookA, History, Mic } from 'lucide-react'
+import { AudioLines, BookA, Clapperboard, History, Mic } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { api, type Health, type HistoryItem, type Voice } from './api'
 import { PreviewProvider } from './components/PreviewPlayer'
 import ClonePage from './pages/ClonePage'
 import DictionaryPage from './pages/DictionaryPage'
 import HistoryPage from './pages/HistoryPage'
+import ShadowPage from './pages/ShadowPage'
 import StudioPage from './pages/StudioPage'
 
-type Tab = 'studio' | 'clone' | 'history' | 'dictionary'
+type Tab = 'studio' | 'shadow' | 'clone' | 'history' | 'dictionary'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('studio')
@@ -38,6 +39,7 @@ export default function App() {
 
   const tabs: { id: Tab; label: string; icon: typeof Mic; badge?: number }[] = [
     { id: 'studio', label: 'Văn bản thành giọng nói', icon: AudioLines },
+    { id: 'shadow', label: 'Luyện Shadowing', icon: Clapperboard },
     { id: 'clone', label: 'Nhân bản giọng', icon: Mic },
     { id: 'history', label: 'Lịch sử', icon: History, badge: history.length },
     { id: 'dictionary', label: 'Từ điển', icon: BookA },
@@ -83,6 +85,7 @@ export default function App() {
               onOpenDictionary={() => setTab('dictionary')}
             />
           )}
+          {tab === 'shadow' && <ShadowPage voices={voices} ready={ready} />}
           {tab === 'clone' && (
             <ClonePage voices={voices} ready={ready} consentSentence={health?.consent_sentence ?? ''} onChange={loadVoices} />
           )}

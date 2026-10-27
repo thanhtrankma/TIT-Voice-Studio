@@ -2,7 +2,7 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 import soundfile as sf
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import engine as eng, store, text as textproc
+from . import engine as eng, english, shadow, store, text as textproc
 from .config import PRECISION, ROOT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -160,7 +160,7 @@ def job_status(job_id: str):
         raise HTTPException(404, "Không tìm thấy job.")
     ahead = sum(1 for j in engine.jobs.values() if j.status == "queued" and j.created < job.created)
     return {"id": job.id, "kind": job.kind, "status": job.status, "progress": round(job.progress, 3),
-            "error": job.error, "result": job.result, "queue_position": ahead}
+            "stage": job.stage, "error": job.error, "result": job.result, "queue_position": ahead}
 
 
 # ── lịch sử ────────────────────────────────────────────────────────────────
@@ -184,6 +184,117 @@ def delete_history(item_id: str):
     store.delete_history(item_id)
     for suffix in (".wav", ".mp3"):
         eng.history_wav(item_id).with_suffix(suffix).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# ── luyện Shadowing ────────────────────────────────────────────────────────
+def _download_stage(job):
+    def progress(done, total):
+        job.stage = f"Đang tải giọng bản xứ lần đầu ({done / 1e6:.0f}/{total / 1e6:.0f} MB)…"
+        job.progress = done / total
+    return progress
+
+
+@app.get("/api/english")
+def english_status():
+    """Giọng tiếng Anh bản xứ (Kokoro): danh sách giọng và model đã tải chưa."""
+    return english.status()
+
+
+@app.get("/api/english/voices/{voice}/preview")
+def english_preview(voice: str):
+    _require_ready()
+    if not english.has_voice(voice):
+        raise HTTPException(404, "Không có giọng này.")
+    path = engine.preview_path(voice)
+    if path.exists():
+        return FileResponse(path, media_type="audio/wav")
+
+    def run(job):
+        if not path.exists():
+            audio, _ = english.synthesize(english.PREVIEW_TEXT, voice, _download_stage(job))
+            eng.write_wav(eng.normalize_loudness(audio), path)
+        return {"url": f"/api/english/voices/{voice}/preview"}
+
+    job = engine.submit("preview", run)
+    return {"job_id": job.id}
+
+
+class ShadowRequest(BaseModel):
+    text: str
+    voice: str
+    title: str = Field("", max_length=80)
+    repeats: int = Field(1, ge=1, le=3)
+    slow_speed: float = Field(0.8, ge=0.6, le=1.0)
+    gap_factor: float = Field(1.3, ge=0.8, le=2.5)
+    full_run: bool = True
+    aspect: Literal["16:9", "9:16"] = "16:9"
+
+
+SHADOW_FILES = {
+    "video": ("lesson.mp4", "video/mp4"),
+    "audio": ("lesson.mp3", "audio/mpeg"),
+    "srt": ("lesson.srt", "application/x-subrip"),
+    "timeline": ("timeline.json", "application/json"),
+}
+
+
+@app.post("/api/shadow")
+def create_shadow(req: ShadowRequest):
+    _require_ready()
+    lines = shadow.parse_lesson(req.text)
+    if not lines:
+        raise HTTPException(400, "Hãy nhập ít nhất một câu tiếng Anh.")
+    if len(lines) > shadow.MAX_LINES:
+        raise HTTPException(400, f"Tối đa {shadow.MAX_LINES} câu mỗi bài (hiện {len(lines)}).")
+    for i, line in enumerate(lines, 1):
+        if len(line.en) > shadow.MAX_LINE_CHARS:
+            raise HTTPException(400, f"Câu {i} dài quá {shadow.MAX_LINE_CHARS} ký tự, hãy tách nhỏ.")
+    native = english.is_native(req.voice)
+    if not (english.has_voice(req.voice) if native else engine.has_voice(req.voice)):
+        raise HTTPException(404, "Không có giọng này.")
+    voice_label = english.label(req.voice) if native else req.voice
+    settings = shadow.Settings(**req.model_dump(exclude={"text", "voice"}), voice=voice_label)
+
+    def speak(job):   # luồng mô hình: 0 → 0.85
+        def progress(p):
+            job.stage = None
+            job.progress = p * 0.85
+        return shadow.synthesize_lines(engine.tts, lines, req.voice, progress, _download_stage(job))
+
+    def render(job, spoken):   # luồng dựng: 0.85 → 1
+        def progress(p):
+            job.progress = 0.85 + p * 0.15
+        clips, timings = spoken
+        meta = shadow.build(job.id, lines, clips, settings, progress, timings)
+        return store.add_shadow(job.id, meta["title"], voice_label, len(lines), meta["duration"], req.aspect)
+
+    job = engine.submit("shadow", speak, then=render)
+    return {"job_id": job.id, "lines": len(lines)}
+
+
+@app.get("/api/shadow")
+def list_shadow():
+    return store.list_shadow()
+
+
+@app.get("/api/shadow/{item_id}/{kind}")
+def shadow_file(item_id: str, kind: str, download: bool = False):
+    if kind not in SHADOW_FILES:
+        raise HTTPException(404, "Không có loại file này.")
+    name, media = SHADOW_FILES[kind]
+    if not store.get_shadow(item_id) or not (path := shadow.lesson_dir(item_id) / name).exists():
+        raise HTTPException(404, "Không tìm thấy bài luyện.")
+    filename = f"tit-shadowing-{item_id}{path.suffix}" if download else None
+    return FileResponse(path, media_type=media, filename=filename)
+
+
+@app.delete("/api/shadow/{item_id}")
+def delete_shadow(item_id: str):
+    if not store.get_shadow(item_id):
+        raise HTTPException(404, "Không tìm thấy bài luyện.")
+    store.delete_shadow(item_id)
+    shutil.rmtree(shadow.lesson_dir(item_id), ignore_errors=True)
     return {"ok": True}
 
 

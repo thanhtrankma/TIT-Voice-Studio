@@ -2,6 +2,7 @@
 
 Mô hình ONNX không an toàn khi gọi song song, nên mọi việc (tạo giọng, nghe thử,
 nhân bản) đi qua một hàng đợi duy nhất. API chỉ tạo job rồi trả về ngay.
+Phần việc không cần mô hình (dựng video) chạy tiếp ở một luồng riêng để hàng đợi đi tiếp.
 """
 import json
 import logging
@@ -10,9 +11,10 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import soundfile as sf
@@ -37,6 +39,7 @@ class Job:
     kind: str
     status: str = "queued"   # queued | running | done | error
     progress: float = 0.0
+    stage: Optional[str] = None   # mô tả bước đang chạy khi khác bước thường (vd. đang tải model)
     error: Optional[str] = None
     result: Optional[dict] = None
     created: float = field(default_factory=time.time)
@@ -48,7 +51,8 @@ class Engine:
         self.ready = threading.Event()
         self.load_error: Optional[str] = None
         self.jobs: Dict[str, Job] = {}
-        self._queue: "queue.Queue[tuple[Job, Callable[[Job], dict]]]" = queue.Queue()
+        self._queue: "queue.Queue[tuple[Job, Callable[[Job], Any], Optional[Callable[[Job, Any], dict]]]]" = queue.Queue()
+        self._post = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
         self._custom: Dict[str, dict] = {}
         threading.Thread(target=self._run, daemon=True, name="tts-worker").start()
 
@@ -67,21 +71,38 @@ class Engine:
             self.load_error = str(e)
             return
         while True:
-            job, fn = self._queue.get()
+            job, fn, then = self._queue.get()
             job.status = "running"
+            if not then:
+                self._finish(job, fn)
+                continue
             try:
-                job.result = fn(job)
-                job.progress = 1.0
-                job.status = "done"
+                first = fn(job)
             except Exception as e:
-                log.exception("Job %s lỗi", job.id)
-                job.error = str(e)
-                job.status = "error"
+                self._fail(job, e)
+                continue
+            self._post.submit(self._finish, job, lambda j, r=first, then=then: then(j, r))
 
-    def submit(self, kind: str, fn: Callable[[Job], dict]) -> Job:
+    @staticmethod
+    def _finish(job: Job, fn: Callable[[Job], Any]) -> None:
+        try:
+            job.result = fn(job)
+            job.progress = 1.0
+            job.status = "done"
+        except Exception as e:
+            Engine._fail(job, e)
+
+    @staticmethod
+    def _fail(job: Job, e: Exception) -> None:
+        log.exception("Job %s lỗi", job.id, exc_info=e)
+        job.error = str(e)
+        job.status = "error"
+
+    def submit(self, kind: str, fn: Callable[[Job], Any], then: Optional[Callable[[Job, Any], dict]] = None) -> Job:
+        """`then` (nếu có) nhận kết quả của `fn` và chạy ở luồng dựng, không giữ luồng mô hình."""
         job = Job(id=uuid.uuid4().hex[:12], kind=kind)
         self.jobs[job.id] = job
-        self._queue.put((job, fn))
+        self._queue.put((job, fn, then))
         self._prune_jobs()
         return job
 
