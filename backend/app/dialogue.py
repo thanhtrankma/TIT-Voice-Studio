@@ -88,11 +88,16 @@ def parse_marks(raw: str) -> Tuple[str, List[List[int]]]:
 
 
 # Thẻ trong câu, viết tiếng Việt, Anh hoặc Trung: [nghỉ 500ms] / [pause 1s] chèn khoảng lặng; thẻ cảm xúc
-# [cười] / [laugh] / [笑]… chỉ giọng Việt VieNeu thể hiện được. Chữ trên màn hình, pinyin và phụ đề bỏ hết thẻ.
+# [cười] / [laugh] / [笑]… thì giọng Việt VieNeu cười, thở dài thật, giọng Trung Kokoro đọc thán từ tương ứng
+# (ZH_EMOTIONS). Chữ trên màn hình, pinyin và phụ đề bỏ hết thẻ.
 _PAUSE_TAG = re.compile(r"\[\s*(?:nghỉ|pause|停顿)\s*(\d+(?:[.,]\d+)?)\s*(ms|s)\s*\]", re.IGNORECASE)
 _EMOTIONS = [("cười", r"cười|laugh(?:s|ing)?|笑"), ("thở dài", r"thở dài|sigh(?:s|ing)?|叹气"),
              ("hắng giọng", r"hắng giọng|clears? (?:one's |his |her |the )?throat|清嗓子?")]
 _EMOTION_TAG = re.compile(r"\[\s*(" + "|".join(p for _, p in _EMOTIONS) + r")\s*\]", re.IGNORECASE)
+# thán từ đọc thay thẻ cảm xúc ở câu tiếng Trung; "咳，咳" có dấu phẩy để đọc "ké, ké" (viết liền
+# "咳咳" thì bị đọc thành "hāi hāi")
+ZH_EMOTIONS = {"cười": "哈哈哈！", "thở dài": "唉……", "hắng giọng": "咳，咳。"}
+EMOTION_GAP_S = 0.15
 _ANY_TAG = re.compile(r"\s*(?:" + _PAUSE_TAG.pattern + "|" + _EMOTION_TAG.pattern + r")\s*", re.IGNORECASE)
 _CJK = re.compile(r"[\u3000-\u303f\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]")
 
@@ -107,11 +112,14 @@ def strip_tags(text: str) -> str:
     return _ANY_TAG.sub(join, text).strip()
 
 
+def _emotion(word: str) -> str:
+    """Tên chuẩn (theo VieNeu) của thẻ cảm xúc: "laugh", "笑" → "cười"."""
+    return next(tag for tag, p in _EMOTIONS if re.fullmatch(p, word.strip(), re.IGNORECASE))
+
+
 def vieneu_tags(text: str) -> str:
     """Đổi thẻ viết kiểu Anh/Trung sang thẻ VieNeu hiểu: [pause 1s] → [nghỉ 1s], [laugh] → [cười]."""
-    def emotion(m: re.Match) -> str:
-        return "[" + next(tag for tag, p in _EMOTIONS if re.fullmatch(p, m[1].strip(), re.IGNORECASE)) + "]"
-    return _EMOTION_TAG.sub(emotion, _PAUSE_TAG.sub(lambda m: f"[nghỉ {m[1]}{m[2]}]", text))
+    return _EMOTION_TAG.sub(lambda m: f"[{_emotion(m[1])}]", _PAUSE_TAG.sub(lambda m: f"[nghỉ {m[1]}{m[2]}]", text))
 
 
 def _spoken(raw: str, shown: str) -> str:
@@ -209,19 +217,33 @@ def synthesize(utts: Sequence[Utterance], voices: Tuple[str, str], speed: float,
 
 
 def speak_zh(text: str, voice: str, speed: float, on_download: Optional[english.ProgressFn] = None) -> np.ndarray:
-    """Đọc câu tiếng Trung có thẻ: [nghỉ …] thành khoảng lặng. Thẻ cảm xúc bị bỏ qua vì giọng Kokoro
-    không cười hay thở dài được (đọc thành chữ thì còn tệ hơn)."""
-    parts = _PAUSE_TAG.split(text)          # [chữ, số, đơn vị, chữ, …]
+    """Đọc câu tiếng Trung có thẻ, theo đúng vị trí thẻ trong câu: [nghỉ …] thành khoảng lặng; thẻ cảm
+    xúc thành thán từ tiếng Trung (哈哈哈, 唉, 咳咳) đọc bằng chính giọng đó, vì Kokoro không có
+    tiếng cười hay tiếng thở thật và bỏ trống thì người nghe không biết nhân vật đang cười."""
     audio: List[np.ndarray] = []
-    for i in range(0, len(parts), 3):
-        chunk = strip_tags(parts[i])
+    spoke = False
+
+    def say(chunk: str) -> None:
+        nonlocal spoke
+        chunk = strip_tags(chunk)
         if chinese.has_hanzi(chunk) or re.search(r"[A-Za-z0-9]", chunk):
             audio.append(chinese.synthesize(chunk, voice, speed, on_download))
-        if i + 1 < len(parts):
-            value = float(parts[i + 1].replace(",", "."))
-            seconds = min(value / 1000 if parts[i + 2].lower() == "ms" else value, textproc.MAX_PAUSE_S)
+            spoke = True
+
+    tags = sorted([*_PAUSE_TAG.finditer(text), *_EMOTION_TAG.finditer(text)], key=lambda m: m.start())
+    pos = 0
+    for m in tags:
+        say(text[pos:m.start()])
+        if m.re is _PAUSE_TAG:
+            value = float(m[1].replace(",", "."))
+            seconds = min(value / 1000 if m[2].lower() == "ms" else value, textproc.MAX_PAUSE_S)
             audio.append(np.zeros(int(seconds * SR), dtype=np.float32))
-    if not any(len(a) and a.any() for a in audio):
+        else:
+            audio.append(chinese.synthesize(ZH_EMOTIONS[_emotion(m[1])], voice, speed, on_download))
+            audio.append(np.zeros(int(EMOTION_GAP_S * SR), dtype=np.float32))
+        pos = m.end()
+    say(text[pos:])
+    if not spoke:
         raise ValueError(f"Câu “{strip_tags(text)}” không có chữ để đọc.")
     return np.concatenate(audio)
 

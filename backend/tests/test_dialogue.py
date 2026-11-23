@@ -279,16 +279,19 @@ def test_tags_drive_audio_but_never_show_on_screen():
     assert dialogue.strip_tags("Okay, [pause 500ms] then [smile]") == "Okay, then [smile]"   # thẻ lạ giữ nguyên
 
 
-def test_chinese_pause_tag_becomes_silence(monkeypatch):
+def test_chinese_tags_become_silence_and_interjections(monkeypatch):
     said = []
 
     def fake(text, voice, speed, on_download=None):
         said.append(text)
         return np.ones(int(0.5 * dialogue.SR), dtype=np.float32)
     monkeypatch.setattr(dialogue.chinese, "synthesize", fake)
-    audio = dialogue.speak_zh("[cười] 我们去海边了，[nghỉ 500ms] 那里很好。[nghỉ 2s]", "v", 1.0)
-    assert said == ["我们去海边了，", "那里很好。"]                    # thẻ cảm xúc không bị đọc thành chữ
-    assert len(audio) == int(0.5 * dialogue.SR) * 2 + int(0.5 * dialogue.SR) + 2 * dialogue.SR
-    assert not audio[int(0.5 * dialogue.SR):int(1.0 * dialogue.SR)].any()
+    half = int(0.5 * dialogue.SR)
+    audio = dialogue.speak_zh("[cười] 我们去海边了，[nghỉ 500ms] 那里很好。[sigh]", "v", 1.0)
+    assert said == ["哈哈哈！", "我们去海边了，", "那里很好。", "唉……"]     # cảm xúc thành thán từ, đúng vị trí
+    gap = int(dialogue.EMOTION_GAP_S * dialogue.SR)
+    assert len(audio) == half + gap + half + half + half + half + gap
+    pause = audio[half + gap + half:half + gap + 2 * half]
+    assert not pause.any()                                            # [nghỉ 500ms] là khoảng lặng thật
     with pytest.raises(ValueError, match="không có chữ"):
-        dialogue.speak_zh("[cười] [nghỉ 1s]", "v", 1.0)
+        dialogue.speak_zh("[nghỉ 1s]", "v", 1.0)
