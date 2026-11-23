@@ -4,16 +4,17 @@ import shutil
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Literal, Optional
 
 import soundfile as sf
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import engine as eng, english, shadow, store, text as textproc, youtube
+from . import chinese, dialogue, engine as eng, english, music, shadow, store, text as textproc, thumbnail, youtube
 from .config import PRECISION, ROOT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -203,10 +204,18 @@ def english_status():
     return english.status()
 
 
+@app.get("/api/chinese")
+def chinese_status():
+    """Giọng tiếng Trung (Kokoro, dùng chung model với giọng tiếng Anh bản xứ)."""
+    return chinese.status()
+
+
 @app.get("/api/english/voices/{voice}/preview")
 def english_preview(voice: str):
+    """Nghe thử giọng Kokoro, cả tiếng Anh lẫn tiếng Trung."""
     _require_ready()
-    if not english.has_voice(voice):
+    zh = chinese.has_voice(voice)
+    if not (zh or english.has_voice(voice)):
         raise HTTPException(404, "Không có giọng này.")
     path = engine.preview_path(voice)
     if path.exists():
@@ -214,7 +223,10 @@ def english_preview(voice: str):
 
     def run(job):
         if not path.exists():
-            audio, _ = english.synthesize(english.PREVIEW_TEXT, voice, _download_stage(job))
+            if zh:
+                audio = chinese.synthesize(chinese.PREVIEW_TEXT, voice, on_download=_download_stage(job))
+            else:
+                audio, _ = english.synthesize(english.PREVIEW_TEXT, voice, _download_stage(job))
             eng.write_wav(eng.normalize_loudness(audio), path)
         return {"url": f"/api/english/voices/{voice}/preview"}
 
@@ -276,8 +288,116 @@ def create_shadow(req: ShadowRequest):
 
 
 @app.get("/api/shadow")
-def list_shadow():
-    return store.list_shadow()
+def list_shadow(kind: Literal["shadow", "dialogue"] = "shadow"):
+    return store.list_shadow(kind)
+
+
+# ── video hội thoại tiếng Trung ────────────────────────────────────────────
+class DialogueRequest(BaseModel):
+    text: str
+    voice_a: str
+    voice_b: str
+    vi_voice: Optional[str] = None      # giọng VieNeu đọc nghĩa tiếng Việt; None = không đọc
+    title: str = Field("", max_length=80)
+    repeats: int = Field(2, ge=1, le=5)
+    speed: float = Field(1.0, ge=0.6, le=1.2)
+    speed2: Optional[float] = Field(None, ge=0.5, le=1.2)   # tốc độ lần đọc thứ 2; None = như lần 1
+    pause: float = Field(1.0, ge=0.3, le=4.0)
+    loops: int = Field(1, ge=1, le=dialogue.MAX_LOOPS)
+    show_en: bool = True
+    intro: bool = True
+    music: Optional[str] = None         # id nhạc nền trong /api/music; None = không có nhạc
+    music_volume: float = Field(0.4, ge=0.05, le=1.0)
+
+
+@app.post("/api/dialogue")
+def create_dialogue(req: DialogueRequest):
+    _require_ready()
+    utts = dialogue.parse_dialogue(req.text)
+    if not utts:
+        raise HTTPException(400, "Hãy nhập ít nhất một câu tiếng Trung.")
+    if len(utts) > dialogue.MAX_LINES:
+        raise HTTPException(400, f"Tối đa {dialogue.MAX_LINES} câu mỗi bài (hiện {len(utts)}).")
+    for i, u in enumerate(utts, 1):
+        if len(u.zh) > dialogue.MAX_ZH_CHARS:
+            raise HTTPException(400, f"Câu {i} dài quá {dialogue.MAX_ZH_CHARS} chữ, hãy tách nhỏ.")
+        if max(len(u.vi), len(u.en)) > dialogue.MAX_TEXT_CHARS:
+            raise HTTPException(400, f"Nghĩa của câu {i} dài quá {dialogue.MAX_TEXT_CHARS} ký tự.")
+        if not chinese.has_hanzi(u.zh):
+            raise HTTPException(400, f"Câu {i} (“{u.zh}”) không có chữ Hán để đọc.")
+    for v in (req.voice_a, req.voice_b):
+        if not chinese.has_voice(v):
+            raise HTTPException(404, "Không có giọng tiếng Trung này.")
+    if req.vi_voice and not engine.has_voice(req.vi_voice):
+        raise HTTPException(404, "Không có giọng tiếng Việt này.")
+    if req.music and req.music not in {m["id"] for m in music.list_music()}:
+        raise HTTPException(404, "Không có bản nhạc này.")
+    labels = (chinese.label(req.voice_a), chinese.label(req.voice_b))
+    settings = dialogue.Settings(**req.model_dump(exclude={"text", "voice_a", "voice_b", "vi_voice", "music"}),
+                                 voice_a=labels[0], voice_b=labels[1], vi_voice=req.vi_voice or "",
+                                 music=music.name(req.music) if req.music else "")
+    voice_label = labels[0] if labels[0] == labels[1] else f"{labels[0]} & {labels[1]}"
+
+    def speak(job):   # luồng mô hình: 0 → 0.7
+        def progress(p):
+            job.stage = None
+            job.progress = p * 0.7
+
+        def speak_vi(text):   # job giả: engine.synthesize tự ghi tiến độ của riêng nó
+            return engine.synthesize(SimpleNamespace(progress=0.0), text, req.vi_voice, 1.0)
+
+        return dialogue.synthesize(utts, (req.voice_a, req.voice_b), req.speed, speak_vi if req.vi_voice else None,
+                                   progress, _download_stage(job), dialogue.second_speed(settings),
+                                   dialogue.intro_text(req.title) if req.intro else "")
+
+    def render(job, spoken):   # luồng dựng: 0.7 → 1
+        def progress(p):
+            job.progress = 0.7 + p * 0.3
+        zh, zh2, vi, intro = spoken
+        meta = dialogue.build(job.id, utts, zh, vi, settings, progress, zh2, intro,
+                              music.path(req.music) if req.music else None)
+        return store.add_shadow(job.id, meta["title"], voice_label, len(utts), meta["duration"], "16:9", "dialogue")
+
+    job = engine.submit("dialogue", speak, then=render)
+    return {"job_id": job.id, "lines": len(utts)}
+
+
+# ── nhạc nền ───────────────────────────────────────────────────────────────
+@app.get("/api/music")
+def list_music():
+    return music.list_music()
+
+
+@app.post("/api/music")
+async def add_music(file: UploadFile = File(...), name: str = Form("")):
+    data = await file.read(music.MAX_UPLOAD_BYTES + 1)
+    if len(data) > music.MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"File nhạc tối đa {music.MAX_UPLOAD_BYTES // 2**20} MB.")
+    title = (name.strip() or Path(file.filename or "Nhạc của tôi").stem)[:60]
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / f"upload{Path(file.filename or '').suffix[:8]}"
+        src.write_bytes(data)
+        try:
+            return music.add(src, title)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+
+@app.get("/api/music/{music_id}/audio")
+def music_audio(music_id: str):
+    p = music.path(music_id)
+    if not p:
+        raise HTTPException(404, "Không có bản nhạc này.")
+    return FileResponse(p, media_type="audio/wav" if p.suffix == ".wav" else "audio/mp4")
+
+
+@app.delete("/api/music/{music_id}")
+def delete_music(music_id: str):
+    try:
+        music.remove(music_id)
+    except KeyError:
+        raise HTTPException(404, "Không xoá được bản nhạc này.")
+    return {"ok": True}
 
 
 @app.delete("/api/shadow/{item_id}")
@@ -344,7 +464,28 @@ def _lesson(item_id: str) -> tuple:
 def shadow_youtube(item_id: str):
     """Nội dung gợi ý để đăng, kèm các lần đã đăng bài này."""
     lesson, timeline = _lesson(item_id)
-    return {"draft": youtube.draft(lesson, timeline), "uploads": store.list_youtube(item_id)}
+    themes = {name: [c1, c2] for name, (c1, c2, *_rest) in thumbnail.THEMES.items()}
+    key = "zh" if timeline.get("kind") == "dialogue" else "en"
+    return {"draft": youtube.draft(lesson, timeline), "uploads": store.list_youtube(item_id), "themes": themes,
+            "sentences": [line[key] for line in timeline["lines"]]}
+
+
+class ThumbnailOptions(BaseModel):
+    theme: Literal[tuple(thumbnail.THEMES)] = thumbnail.DEFAULT_THEME
+    headline: str = Field("", max_length=40)
+    quote: str = Field("", max_length=90)
+
+    def render_kwargs(self) -> dict:
+        return {"theme": self.theme, "headline": self.headline.strip() or None, "quote": self.quote.strip() or None}
+
+
+@app.post("/api/shadow/{item_id}/thumbnail")
+def shadow_thumbnail(item_id: str, opts: ThumbnailOptions):
+    """Xem trước ảnh bìa YouTube (JPEG 1280×720)."""
+    lesson, timeline = _lesson(item_id)
+    with tempfile.TemporaryDirectory() as tmp:
+        jpg = thumbnail.render(lesson, timeline, Path(tmp) / "thumb.jpg", **opts.render_kwargs())
+        return Response(jpg.read_bytes(), media_type="image/jpeg")
 
 
 class PublishRequest(BaseModel):
@@ -354,6 +495,7 @@ class PublishRequest(BaseModel):
     privacy: Literal["private", "unlisted", "public"] = "private"
     publish_at: Optional[datetime] = None
     account: Optional[str] = None
+    thumbnail: ThumbnailOptions = ThumbnailOptions()
 
 
 @app.post("/api/shadow/{item_id}/youtube")
@@ -377,7 +519,7 @@ def publish_shadow(item_id: str, req: PublishRequest):
         def progress(p):
             job.progress = p
         rec = youtube.upload(lesson, req.title.strip(), req.description, tags, req.privacy, publish_at,
-                             req.account, progress)
+                             req.account, progress, req.thumbnail.render_kwargs())
         row = store.add_youtube(item_id, rec["video_id"], rec["url"], rec["title"], rec["privacy"],
                                 rec["publish_at"], rec["account"])
         return {**row, "note": rec["note"]}
@@ -392,9 +534,11 @@ def shadow_file(item_id: str, kind: str, download: bool = False):
     if kind not in SHADOW_FILES:
         raise HTTPException(404, "Không có loại file này.")
     name, media = SHADOW_FILES[kind]
-    if not store.get_shadow(item_id) or not (path := shadow.lesson_dir(item_id) / name).exists():
+    lesson = store.get_shadow(item_id)
+    if not lesson or not (path := shadow.lesson_dir(item_id) / name).exists():
         raise HTTPException(404, "Không tìm thấy bài luyện.")
-    filename = f"tit-shadowing-{item_id}{path.suffix}" if download else None
+    prefix = "tit-hoithoai" if lesson["kind"] == "dialogue" else "tit-shadowing"
+    filename = f"{prefix}-{item_id}{path.suffix}" if download else None
     return FileResponse(path, media_type=media, filename=filename)
 
 

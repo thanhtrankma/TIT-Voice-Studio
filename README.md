@@ -17,8 +17,18 @@ Công cụ chuyển văn bản tiếng Việt thành giọng nói, chạy hoàn 
   Mặc định dùng giọng tiếng Anh bản xứ (Kokoro-82M, 10 giọng Mỹ/Anh) và tô sáng theo mốc thời gian thật của từng từ;
   vẫn chọn được giọng VieNeu. Model Kokoro (~192 MB) tự tải ở lần dùng đầu.
   Xem [docs/shadowing-video.md](docs/shadowing-video.md).
+- **Hội thoại tiếng Trung**: dán lời thoại (mỗi dòng một câu, `中文 | Tiếng Việt | English`, dòng trống mở đoạn mới,
+  `*từ khoá*` để tô màu), nhận video 16:9 chia đôi màn hình: người A bên trái, người B bên phải, mỗi bên có chữ Hán,
+  pinyin tự tạo, nghĩa tiếng Việt và câu tiếng Anh; bên đang nói sáng lên. Mỗi câu đọc 1–3 lần bằng 8 giọng
+  tiếng Trung phổ thông của Kokoro (dùng chung model với giọng tiếng Anh), có thể chen nghĩa tiếng Việt đọc bằng
+  VieNeu. Lặp cả bài tới 60 lượt để thành video "ngâm" nhiều giờ (tối đa 11,5 giờ cho vừa giới hạn YouTube).
+  Lần đọc thứ 2 có thể đặt tốc độ riêng (chậm 0.6x–0.9x). Mặc định có **intro** vài giây (tên bài, hai giọng,
+  số câu; giọng Việt đọc tên bài). **Nhạc nền**: 3 bản tự tạo (nền êm, mưa nhẹ, sóng biển) hoặc tải nhạc của bạn
+  lên; nhạc lặp suốt video và tự nhỏ đi khi có giọng đọc.
 - **Đăng YouTube** ngay từ bài luyện: tiêu đề, mô tả (kèm mục lục theo câu và lời thoại) điền sẵn, chọn Riêng tư /
-  Không công khai / Công khai hoặc hẹn giờ công khai, ảnh bìa tự tạo, nhiều tài khoản. Xem mục *Kết nối YouTube* bên dưới.
+  Không công khai / Công khai hoặc hẹn giờ công khai, nhiều tài khoản. Xem mục *Kết nối YouTube* bên dưới.
+- **Ảnh bìa YouTube** 1280×720 tự thiết kế: chữ to có viền, bong bóng thoại trích một câu trong bài, 4 tông màu;
+  sửa chữ lớn, câu trích và xem trước ngay, tải ảnh về được kể cả khi chưa kết nối YouTube.
 
 ## Cài đặt
 
@@ -34,19 +44,17 @@ Lần chạy đầu tiên tự tải mô hình (~700 MB) vào `backend/data/mode
 
 ## Chạy
 
-Hai cửa sổ terminal:
+Một lệnh ở thư mục gốc dự án:
 
 ```bash
-cd backend && uv run uvicorn app.main:app --port 8765
+./start.sh
 ```
 
-```bash
-cd frontend && npm run dev
-```
+Lệnh tự cài thư viện còn thiếu, build lại giao diện nếu code giao diện có thay đổi, chạy backend rồi mở
+http://localhost:8765. Ctrl+C để tắt. Đổi cổng: `PORT=9000 ./start.sh`.
 
-Mở http://localhost:5173.
-
-Hoặc build giao diện một lần (`cd frontend && npm run build`) rồi chỉ chạy backend, mở http://localhost:8765.
+Khi sửa giao diện, chạy `./start.sh --dev`: thêm Vite có tải lại nóng ở http://localhost:5173, backend tự khởi động lại
+khi sửa code Python.
 
 ### Tuỳ chọn
 
@@ -70,14 +78,19 @@ Hoặc build giao diện một lần (`cd frontend && npm run build`) rồi ch�
 | `GET` | `/api/english` | Giọng tiếng Anh bản xứ (`kokoro:*`) và model đã tải chưa |
 | `GET` | `/api/english/voices/{id}/preview` | Nghe thử giọng bản xứ |
 | `POST` | `/api/shadow` | `{text, voice, title, repeats, slow_speed, gap_factor, full_run, aspect}` → `job_id`; `voice` là giọng VieNeu hoặc `kokoro:*` |
-| `GET` | `/api/shadow` | Danh sách bài luyện |
+| `GET` | `/api/chinese` | Giọng tiếng Trung (`kokoro:z*`), nghe thử qua `/api/english/voices/{id}/preview` |
+| `POST` | `/api/dialogue` | `{text, voice_a, voice_b, vi_voice?, title, repeats, speed, pause, loops, show_en}` → `job_id` |
+| `GET` `POST` | `/api/music` | Thư viện nhạc nền; tải lên (form: `file`, `name`) |
+| `GET` `DELETE` | `/api/music/{id}[/audio]` | Nghe thử hoặc xoá nhạc đã tải lên |
+| `GET` | `/api/shadow?kind=shadow\|dialogue` | Danh sách bài luyện hoặc video hội thoại (file, ảnh bìa, đăng YouTube dùng chung các đường dẫn `/api/shadow/{id}/…`) |
 | `GET` | `/api/shadow/{id}/video\|audio\|srt\|timeline` | File của bài luyện |
 | `GET` | `/api/youtube` | Đã có OAuth client chưa, các tài khoản, trạng thái đăng nhập |
 | `POST` | `/api/youtube/client-secret` | Nạp file OAuth client (form: `file`) |
 | `POST` | `/api/youtube/login` | Mở trang đăng nhập Google trên máy chạy backend |
 | `PUT` `DELETE` | `/api/youtube/accounts/{id}[/active]` | Chọn hoặc gỡ tài khoản |
 | `GET` | `/api/shadow/{id}/youtube` | Nội dung gợi ý để đăng và các lần đã đăng |
-| `POST` | `/api/shadow/{id}/youtube` | `{title, description, tags, privacy, publish_at?, account?}` → `job_id` |
+| `POST` | `/api/shadow/{id}/thumbnail` | `{theme, headline, quote}` → ảnh bìa JPEG xem trước |
+| `POST` | `/api/shadow/{id}/youtube` | `{title, description, tags, privacy, publish_at?, account?, thumbnail?}` → `job_id` |
 | `DELETE` | `/api/shadow/{id}` | Xoá bài luyện |
 
 Tài liệu đầy đủ: http://localhost:8765/docs.
@@ -101,6 +114,21 @@ File OAuth client và token nằm trong `backend/data/youtube/` (không đưa l�
 - Video được khai báo `containsSyntheticMedia` (giọng đọc AI), danh mục Giáo dục.
 - Ảnh bìa tuỳ chỉnh cần kênh đã xác minh số điện thoại; chưa xác minh thì video vẫn đăng, chỉ báo chưa đặt được ảnh bìa.
 
+### Ảnh đại diện và banner kênh
+
+Thư mục [`branding/`](branding) có sẵn ảnh đại diện 800×800 và banner 2560×1440 cho kênh, đủ 4 tông màu giống ảnh bìa
+video. Tên kênh, khẩu hiệu nằm gọn trong vùng 1235×338 ở giữa nên điện thoại vẫn thấy đủ; các câu tiếng Anh trang trí
+hai bên chỉ hiện trên máy tính và TV. Tạo lại với tên kênh của bạn:
+
+```bash
+cd backend && uv run python -m app.branding --name "Tên kênh" --theme coral
+```
+
+Kênh luyện tiếng Trung thêm `--lang zh`: biểu tượng đổi sóng âm thành chữ 中, khẩu hiệu “Luyện nói tiếng Trung bằng
+Shadowing”, câu trang trí là chữ Hán kèm pinyin (你叫什么名字？…). Ảnh lưu thành `avatar-zh-<tông>.png`, `banner-zh-<tông>.jpg`.
+
+Tải lên ở YouTube Studio → *Tuỳ chỉnh* (Customization), mục ảnh đại diện và ảnh biểu ngữ.
+
 ## Kiểm thử
 
 ```bash
@@ -121,6 +149,12 @@ Giọng bản xứ chạy bằng [kokoro-onnx](https://github.com/thewh1teagle/k
 Phần chuyển chữ thành âm vị dùng **espeak-ng (GPL-3.0)** qua `espeakng-loader`: dùng cá nhân và nội bộ không sao,
 nhưng nếu phát hành hay bán ứng dụng thì cần xem lại điều kiện GPL. espeak-ng lỗi khi đường dẫn dữ liệu quá dài,
 nên `app/english.py` chép dữ liệu sang thư mục model khi cần.
+
+Giọng tiếng Trung không đi qua espeak: chữ Hán chuyển thành âm vị bằng `misaki[zh]` (Apache-2.0), đúng bộ âm vị
+Kokoro được huấn luyện (espeak đọc sai thanh). Pinyin hiển thị lấy từ `pypinyin` + dữ liệu CC-CEDICT (thanh nhẹ:
+máfan, xièxie), tách từ bằng `jieba`. Chữ Hán vẽ bằng font Hiragino Sans GB có sẵn trên macOS. Video dài chỉ
+encode một lượt rồi nối bản sao bằng stream copy; mỗi lượt làm tròn lên bội số 25.600 mẫu để hình và tiếng
+không lệch khi nối.
 
 ## Sử dụng có trách nhiệm
 

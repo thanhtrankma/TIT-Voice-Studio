@@ -10,14 +10,13 @@ token hỏng thì báo để người dùng kết nối lại.
 import hashlib
 import json
 import re
-import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from . import shadow
+from . import shadow, thumbnail
 from .config import DATA_DIR
 
 YT_DIR = DATA_DIR / "youtube"
@@ -194,20 +193,38 @@ def _clean(text: str) -> str:
     return text.replace("<", "").replace(">", "")   # YouTube từ chối tiêu đề, mô tả có < >
 
 
+def _dialogue_marks(timeline: dict) -> List[tuple]:
+    """Video hội thoại: lặp nhiều lượt thì mỗi lượt một mốc, không thì mỗi đoạn hội thoại một mốc."""
+    intro = timeline.get("intro_duration", 0.0)   # đoạn giới thiệu gộp vào mốc đầu (mốc đầu luôn là 0:00)
+    if timeline.get("loops", 1) > 1:
+        return [(intro + k * timeline["loop_duration"], f"Lượt nghe {k + 1}") for k in range(timeline["loops"])]
+    marks, seen = [], set()
+    for st in timeline["steps"]:
+        if st["kind"] == "zh":
+            line = timeline["lines"][st["line"]]
+            if line["block"] not in seen:
+                seen.add(line["block"])
+                marks.append((intro + st["start"], f"Hội thoại {len(seen)}: {line['zh'][:30]}"))
+    return marks
+
+
 def chapters(timeline: dict) -> List[str]:
     """Mục lục cho YouTube: mỗi câu một mốc (lấy lượt nghe đầu), cộng lượt liền mạch.
 
     YouTube chỉ nhận khi mốc đầu là 0:00, có từ 3 mốc và mỗi đoạn dài ít nhất 10 giây;
     không đủ điều kiện thì trả rỗng. Đoạn mở đầu chỉ vài giây nên gộp vào câu 1.
     """
-    marks, seen = [], set()
-    for st in timeline["steps"]:
-        if st["kind"] == "listen" and st["line"] not in seen:
-            seen.add(st["line"])
-            en = timeline["lines"][st["line"]]["en"]
-            marks.append((st["start"], f"Câu {st['line'] + 1}: {en[:60]}"))
-        elif st["kind"] == "full" and st["line"] == 0:
-            marks.append((st["start"], "Shadowing liền mạch"))
+    if timeline.get("kind") == "dialogue":
+        marks = _dialogue_marks(timeline)
+    else:
+        marks, seen = [], set()
+        for st in timeline["steps"]:
+            if st["kind"] == "listen" and st["line"] not in seen:
+                seen.add(st["line"])
+                en = timeline["lines"][st["line"]]["en"]
+                marks.append((st["start"], f"Câu {st['line'] + 1}: {en[:60]}"))
+            elif st["kind"] == "full" and st["line"] == 0:
+                marks.append((st["start"], "Shadowing liền mạch"))
     if marks:
         marks[0] = (0.0, marks[0][1])
     ends = [m[0] for m in marks[1:]] + [timeline["duration"]]
@@ -216,8 +233,63 @@ def chapters(timeline: dict) -> List[str]:
     return [f"{_clock(t)} {_clean(label)}" for t, label in marks]
 
 
+def _fit_description(desc: List[str], toc: List[str], script: List[str], footer: List[str]) -> str:
+    def size(*parts):
+        return len("\n".join(sum(parts, [])))
+
+    # Mô tả tối đa 5000 ký tự: bớt lời thoại từ cuối trước; mục lục mà vẫn quá dài thì bỏ hẳn,
+    # vì YouTube chỉ nhận mục lục liền mạch từ 0:00.
+    if size(desc, toc, footer) > DESCRIPTION_LIMIT:
+        toc = []
+    while len(script) > 2 and size(desc, toc, script, footer) > DESCRIPTION_LIMIT:
+        script.pop()
+    return _clean("\n".join(desc + toc + (script if len(script) > 2 else []) + footer))
+
+
+def _hours(seconds: float) -> str:
+    h = round(seconds / 3600 * 2) / 2
+    return f"{h:g} tiếng".replace(".", ",")
+
+
+def draft_dialogue(lesson: dict, timeline: dict) -> dict:
+    """Tiêu đề, mô tả, tag gợi ý cho video hội thoại tiếng Trung."""
+    title = lesson["title"]
+    s = timeline["settings"]
+    n = lesson["lines"]
+    loops = timeline.get("loops", 1)
+    long = timeline["duration"] >= 3600
+    slow = s.get("speed2")
+    how = f"Mỗi câu đọc {s['repeats']} lần" \
+        + (f" (lần 2 ở tốc độ {slow:g}x)" if slow and s["repeats"] > 1 and abs(slow - s.get("speed", 1)) > 0.01 else "") \
+        + (", kèm nghĩa tiếng Việt" if s.get("vi_voice") else "") + "."
+    desc = [
+        f"Luyện nghe hội thoại tiếng Trung: {n} câu, giọng {lesson['voice']}; có chữ Hán, pinyin và nghĩa tiếng Việt.",
+        f"{how} Cả bài lặp {loops} lượt, hợp để nghe thụ động khi làm việc hoặc trước khi ngủ."
+        if loops > 1 else how,
+    ]
+    marks = chapters(timeline)
+    toc = ["", "Mục lục:", *marks] if marks else []
+    script = ["", "Lời thoại:"]
+    for line in timeline["lines"]:
+        script.append(f"{'AB'[line['speaker']]}: {line['zh']}\n   {line['pinyin']}"
+                      + (f"\n   {line['vi']}" if line.get("vi") else ""))
+    footer = ["", "Giọng đọc được tạo bằng AI (TIT Voice Studio).",
+              "#hoctiengtrung #luyennghetiengtrung #tiengtrunggiaotiep #pinyin"]
+    suffix = f"Nghe tiếng Trung {_hours(timeline['duration'])}" if long else "Luyện nghe tiếng Trung"
+    return {
+        "title": _clean(f"{title.strip()} | {suffix} | Pinyin, nghĩa tiếng Việt")[:100].strip(),
+        "description": _fit_description(desc, toc, script, footer),
+        "tags": ["học tiếng Trung", "luyện nghe tiếng Trung", "tiếng Trung giao tiếp", "hội thoại tiếng Trung",
+                 "nghe tiếng Trung khi ngủ", "pinyin", "学中文", "Chinese listening", _clean(title)[:60]],
+        "thumbnail": {"theme": thumbnail.DEFAULT_THEME, "headline": thumbnail.default_headline(title),
+                      "quote": thumbnail.default_quote(timeline)},
+    }
+
+
 def draft(lesson: dict, timeline: dict) -> dict:
     """Tiêu đề, mô tả, tag gợi ý cho một bài luyện."""
+    if timeline.get("kind") == "dialogue":
+        return draft_dialogue(lesson, timeline)
     title = lesson["title"]
     n = lesson["lines"]
     full = timeline["settings"].get("full_run")
@@ -233,34 +305,14 @@ def draft(lesson: dict, timeline: dict) -> dict:
         script.append(f"{i}. {line['en']}" + (f"\n   {line['vi']}" if line.get("vi") else ""))
     footer = ["", "Giọng đọc được tạo bằng AI (TIT Voice Studio).",
               "#shadowing #luyennoitienganh #hoctienganh"]
-
-    def size(*parts):
-        return len("\n".join(sum(parts, [])))
-
-    # Mô tả tối đa 5000 ký tự: bớt lời thoại từ cuối trước; mục lục mà vẫn quá dài thì bỏ hẳn,
-    # vì YouTube chỉ nhận mục lục liền mạch từ 0:00.
-    if size(desc, toc, footer) > DESCRIPTION_LIMIT:
-        toc = []
-    while len(script) > 2 and size(desc, toc, script, footer) > DESCRIPTION_LIMIT:
-        script.pop()
     return {
         "title": _clean(f"{title.strip()} | Luyện nói tiếng Anh Shadowing")[:100].strip(),
-        "description": _clean("\n".join(desc + toc + (script if len(script) > 2 else []) + footer)),
+        "description": _fit_description(desc, toc, script, footer),
         "tags": ["shadowing", "English shadowing", "luyện nói tiếng Anh", "luyện nghe tiếng Anh",
                  "học tiếng Anh", "English speaking practice", _clean(title)[:60]],
+        "thumbnail": {"theme": thumbnail.DEFAULT_THEME, "headline": thumbnail.default_headline(title),
+                      "quote": thumbnail.pick_quote(timeline["lines"])},
     }
-
-
-def thumbnail(lesson: dict, out: Path) -> Path:
-    """Ảnh bìa 1280×720 vẽ cùng kiểu trang mở đầu của video."""
-    from PIL import Image
-
-    with tempfile.TemporaryDirectory() as tmp:
-        canvas = shadow.Canvas("16:9", Path(tmp))
-        png = canvas.title_card(lesson["title"], f"Shadowing · {lesson['lines']} câu · Giọng {lesson['voice']}",
-                                "Luyện nghe và nói tiếng Anh", 1.0)
-        Image.open(png).convert("RGB").resize((1280, 720), Image.LANCZOS).save(out, "JPEG", quality=90)
-    return out
 
 
 def to_utc(t: datetime) -> str:
@@ -272,8 +324,10 @@ def to_utc(t: datetime) -> str:
 
 def upload(lesson: dict, title: str, description: str, tags: List[str], privacy: str,
            publish_at: Optional[datetime], account_id: Optional[str],
-           on_progress: Callable[[float], None], service=None) -> dict:
+           on_progress: Callable[[float], None], thumb: Optional[dict] = None, service=None) -> dict:
     """Tải video lên kênh. Có `publish_at` thì để riêng tư và YouTube tự công khai đúng giờ.
+
+    `thumb` là tuỳ chọn ảnh bìa (theme, headline, quote) cho `thumbnail.render`.
 
     `service` chỉ dùng trong kiểm thử, thay cho client thật của googleapiclient.
     """
@@ -294,6 +348,7 @@ def upload(lesson: dict, title: str, description: str, tags: List[str], privacy:
     else:
         label = account_id or ""
 
+    timeline = json.loads((folder / "timeline.json").read_text(encoding="utf-8"))
     while len(",".join(tags)) > 480:    # YouTube giới hạn tổng độ dài tag khoảng 500 ký tự
         tags = tags[:-1]
     status = {"privacyStatus": privacy, "selfDeclaredMadeForKids": False,
@@ -302,7 +357,8 @@ def upload(lesson: dict, title: str, description: str, tags: List[str], privacy:
         status["privacyStatus"] = "private"
         status["publishAt"] = to_utc(publish_at)
     body = {"snippet": {"title": title, "description": description, "tags": tags, "categoryId": EDUCATION,
-                        "defaultLanguage": "vi", "defaultAudioLanguage": "en"},
+                        "defaultLanguage": "vi",
+                        "defaultAudioLanguage": "zh" if timeline.get("kind") == "dialogue" else "en"},
             "status": status}
 
     media = MediaFileUpload(str(video), chunksize=8 * 1024 * 1024, resumable=True, mimetype="video/mp4")
@@ -335,14 +391,14 @@ def upload(lesson: dict, title: str, description: str, tags: List[str], privacy:
             time.sleep(5 * (MAX_RETRIES - retries))
     vid = resp["id"]
 
+    # Video dọc ngắn thành Shorts: YouTube bỏ qua ảnh bìa nhưng không báo lỗi, nên cứ đặt.
     note = None
-    if lesson["aspect"] == "16:9":     # Shorts không đặt ảnh bìa qua API được
-        try:
-            thumb = thumbnail(lesson, folder / "thumbnail.jpg")
-            service.thumbnails().set(videoId=vid, media_body=MediaFileUpload(str(thumb), mimetype="image/jpeg")).execute()
-        except HttpError as e:
-            note = (f"Chưa đặt được ảnh bìa ({e.resp.status}): kênh cần xác minh số điện thoại "
-                    "để dùng ảnh bìa tuỳ chỉnh.")
+    try:
+        jpg = thumbnail.render(lesson, timeline, folder / "thumbnail.jpg", **(thumb or {}))
+        service.thumbnails().set(videoId=vid, media_body=MediaFileUpload(str(jpg), mimetype="image/jpeg")).execute()
+    except HttpError as e:
+        note = (f"Chưa đặt được ảnh bìa ({e.resp.status}): kênh cần xác minh số điện thoại "
+                "để dùng ảnh bìa tuỳ chỉnh.")
     on_progress(1.0)
     return {"video_id": vid, "url": f"https://youtu.be/{vid}", "title": title,
             "privacy": status["privacyStatus"], "publish_at": status.get("publishAt"),

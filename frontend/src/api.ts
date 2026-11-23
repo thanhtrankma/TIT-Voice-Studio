@@ -3,8 +3,8 @@ export type Voice = {
   name: string
   gender: 'male' | 'female' | string
   region: 'north' | 'central' | 'south' | null
-  /** Chỉ giọng tiếng Anh bản xứ (Kokoro) có: giọng Mỹ hay Anh. */
-  accent?: 'us' | 'uk'
+  /** Chỉ giọng Kokoro có: tiếng Anh-Mỹ, tiếng Anh-Anh hoặc tiếng Trung. */
+  accent?: 'us' | 'uk' | 'zh'
   style: string
   description: string
   featured: boolean
@@ -45,6 +45,8 @@ export type ShadowLesson = {
   lines: number
   duration: number
   aspect: '16:9' | '9:16'
+  /** Bài Shadowing tiếng Anh hay video hội thoại tiếng Trung. */
+  kind: 'shadow' | 'dialogue'
   /** Lần đăng YouTube gần nhất, nếu có. */
   youtube_url?: string | null
 }
@@ -69,7 +71,9 @@ export type YouTubeUpload = {
   note?: string | null
 }
 
-export type YouTubeDraft = { title: string; description: string; tags: string[] }
+export type ThumbnailOptions = { theme: string; headline: string; quote: string }
+
+export type YouTubeDraft = { title: string; description: string; tags: string[]; thumbnail: ThumbnailOptions }
 
 export type ShadowRequest = {
   text: string
@@ -81,6 +85,29 @@ export type ShadowRequest = {
   full_run: boolean
   aspect: '16:9' | '9:16'
 }
+
+export type DialogueRequest = {
+  text: string
+  voice_a: string
+  voice_b: string
+  /** Giọng VieNeu đọc nghĩa tiếng Việt; null = không đọc. */
+  vi_voice: string | null
+  title: string
+  repeats: number
+  speed: number
+  /** Tốc độ lần đọc thứ 2; null = như lần 1. */
+  speed2: number | null
+  pause: number
+  loops: number
+  show_en: boolean
+  /** Đoạn giới thiệu vài giây ở đầu video. */
+  intro: boolean
+  /** id trong /api/music; null = không có nhạc nền. */
+  music: string | null
+  music_volume: number
+}
+
+export type MusicItem = { id: string; name: string; builtin: boolean; duration: number | null }
 
 export type Job<R = unknown> = {
   id: string
@@ -130,7 +157,17 @@ export const api = {
     request(`/api/voices/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   english: () => request<EnglishStatus>('/api/english'),
   shadow: (body: ShadowRequest) => request<{ job_id: string; lines: number }>('/api/shadow', json(body)),
-  shadowLessons: () => request<ShadowLesson[]>('/api/shadow'),
+  shadowLessons: (kind: ShadowLesson['kind'] = 'shadow') => request<ShadowLesson[]>(`/api/shadow?kind=${kind}`),
+  chinese: () => request<EnglishStatus>('/api/chinese'),
+  music: () => request<MusicItem[]>('/api/music'),
+  uploadMusic: (file: File, name = '') => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('name', name)
+    return request<MusicItem>('/api/music', { method: 'POST', body: form })
+  },
+  deleteMusic: (id: string) => request(`/api/music/${id}`, { method: 'DELETE' }),
+  dialogue: (body: DialogueRequest) => request<{ job_id: string; lines: number }>('/api/dialogue', json(body)),
   deleteShadow: (id: string) => request(`/api/shadow/${id}`, { method: 'DELETE' }),
   youtube: () => request<YouTubeStatus>('/api/youtube'),
   youtubeClientSecret: (file: File) => {
@@ -142,7 +179,20 @@ export const api = {
   youtubeSetActive: (id: string) =>
     request<YouTubeStatus>(`/api/youtube/accounts/${encodeURIComponent(id)}/active`, { method: 'PUT' }),
   shadowYoutube: (id: string) =>
-    request<{ draft: YouTubeDraft; uploads: YouTubeUpload[] }>(`/api/shadow/${id}/youtube`),
+    request<{
+      draft: YouTubeDraft
+      uploads: YouTubeUpload[]
+      themes: Record<string, [string, string]>
+      sentences: string[]
+    }>(
+      `/api/shadow/${id}/youtube`,
+    ),
+  /** Ảnh bìa xem trước (JPEG). */
+  thumbnail: async (id: string, opts: ThumbnailOptions) => {
+    const res = await fetch(`/api/shadow/${id}/thumbnail`, json(opts))
+    if (!res.ok) throw new Error('Không tạo được ảnh bìa.')
+    return res.blob()
+  },
   publishShadow: (
     id: string,
     body: YouTubeDraft & { privacy: YouTubePrivacy; publish_at: string | null; account: string | null },
@@ -151,6 +201,8 @@ export const api = {
 
 export const shadowUrl = (id: string, kind: 'video' | 'audio' | 'srt' | 'timeline', download = false) =>
   `/api/shadow/${id}/${kind}${download ? '?download=true' : ''}`
+
+export const musicUrl = (id: string) => `/api/music/${id}/audio`
 
 export const audioUrl = (id: string, format: 'wav' | 'mp3' = 'wav', download = false) =>
   `/api/history/${id}/audio?format=${format}${download ? '&download=true' : ''}`

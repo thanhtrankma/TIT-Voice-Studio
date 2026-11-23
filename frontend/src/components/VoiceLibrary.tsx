@@ -64,9 +64,9 @@ export default function VoiceLibrary({ voices, selected, onSelect }: Props) {
   const [gender, setGender] = useState('all')
   const [region, setRegion] = useState<string | null>(null)
 
-  // Giọng tiếng Anh bản xứ lọc theo giọng Mỹ/Anh thay cho vùng miền.
+  // Giọng Kokoro lọc theo giọng Mỹ/Anh thay cho vùng miền; giọng tiếng Trung không có nhóm để lọc.
   const native = voices.some((v) => v.accent)
-  const chips = native ? ACCENTS : REGIONS
+  const chips = native ? ACCENTS.filter((a) => voices.some((v) => v.accent === a.id)) : REGIONS
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()

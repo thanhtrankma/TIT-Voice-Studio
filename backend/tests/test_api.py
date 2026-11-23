@@ -255,6 +255,66 @@ def test_shadow_lesson_with_native_voice(client):
     assert client.delete(f"/api/shadow/{item['id']}").status_code == 200
 
 
+ZH_A, ZH_B = "kokoro:zf_xiaoxiao", "kokoro:zm_yunxi"
+
+
+@pytest.mark.parametrize(
+    "body,status",
+    [
+        ({"text": "  \n | chỉ có nghĩa", "voice_a": ZH_A, "voice_b": ZH_B}, 400),
+        ({"text": "Hello there.", "voice_a": ZH_A, "voice_b": ZH_B}, 400),          # không có chữ Hán
+        ({"text": "你好。", "voice_a": "kokoro:af_heart", "voice_b": ZH_B}, 404),   # giọng tiếng Anh
+        ({"text": "你好。", "voice_a": ZH_A, "voice_b": ZH_B, "vi_voice": "Không có"}, 404),
+        ({"text": "你好。\n" * 301, "voice_a": ZH_A, "voice_b": ZH_B}, 400),
+        ({"text": "好" * 81, "voice_a": ZH_A, "voice_b": ZH_B}, 400),
+        ({"text": "你好。", "voice_a": ZH_A, "voice_b": ZH_B, "loops": 0}, 422),
+        ({"text": "你好。", "voice_a": ZH_A, "voice_b": ZH_B, "speed2": 0.3}, 422),
+    ],
+)
+def test_dialogue_rejects_bad_input(client, body, status):
+    assert client.post("/api/dialogue", json=body).status_code == status
+
+
+def test_chinese_voices_listed(client):
+    data = client.get("/api/chinese").json()
+    assert len(data["voices"]) == 8 and all(v["accent"] == "zh" for v in data["voices"])
+
+
+@pytest.mark.skipif(not english.installed(), reason="chưa tải model Kokoro")
+def test_dialogue_end_to_end(client):
+    r = client.post("/api/dialogue", json={
+        "text": "你*抽烟*吗？ | Bạn *hút thuốc* không? | Do you smoke?\n不抽，谢谢。 | Không, cảm ơn.",
+        "voice_a": ZH_A, "voice_b": ZH_B, "vi_voice": "Adam", "title": "Hội thoại QA", "repeats": 2, "loops": 2,
+        "speed2": 0.7,
+    })
+    assert r.status_code == 200, r.text
+    job = wait_job(client, r.json()["job_id"], timeout=300)
+    assert job["status"] == "done", job["error"]
+    item = job["result"]
+    assert item["kind"] == "dialogue" and item["voice"] == "Xiaoxiao & Yunxi" and item["lines"] == 2
+    assert any(s["id"] == item["id"] for s in client.get("/api/shadow?kind=dialogue").json())
+    assert all(s["id"] != item["id"] for s in client.get("/api/shadow").json())    # tab Shadowing không lẫn
+
+    timeline = client.get(f"/api/shadow/{item['id']}/timeline").json()
+    assert timeline["loops"] == 2 and timeline["duration"] == pytest.approx(item["duration"])
+    kinds = [s["kind"] for s in timeline["steps"] if s["kind"] != "pause"]
+    assert kinds == ["zh", "vi", "zh2", "zh", "vi", "zh2"]   # nghĩa Việt sau lần đầu, lần 2 đọc chậm 0.7x
+    reads = {(s["kind"], s["line"]): s["duration"] for s in timeline["steps"] if s["kind"] != "pause"}
+    assert all(0.4 < d < 5 for d in reads.values())
+    assert all(reads[("zh2", i)] > reads[("zh", i)] * 1.2 for i in (0, 1))   # bản đọc chậm dài hơn thật
+    video = client.get(f"/api/shadow/{item['id']}/video?download=true")
+    assert video.headers["content-type"] == "video/mp4" and "tit-hoithoai-" in video.headers["content-disposition"]
+    yt = client.get(f"/api/shadow/{item['id']}/youtube").json()
+    assert yt["sentences"] == ["你抽烟吗？", "不抽，谢谢。"] and "Pinyin" in yt["draft"]["title"]
+
+    preview = client.get(f"/api/english/voices/{ZH_B}/preview")
+    if preview.headers["content-type"].startswith("application/json"):
+        assert wait_job(client, preview.json()["job_id"])["status"] == "done"
+        preview = client.get(f"/api/english/voices/{ZH_B}/preview")
+    assert preview.headers["content-type"] == "audio/wav" and len(preview.content) > 50_000
+    assert client.delete(f"/api/shadow/{item['id']}").status_code == 200
+
+
 def test_youtube_publish_flow(client, monkeypatch, tmp_path):
     from datetime import datetime, timedelta
 
@@ -272,6 +332,9 @@ def test_youtube_publish_flow(client, monkeypatch, tmp_path):
     assert data["draft"]["title"] == "Bài YouTube | Luyện nói tiếng Anh Shadowing" and data["uploads"] == []
     assert "See you soon." in data["draft"]["description"]
     assert client.get("/api/shadow/nothere0000/youtube").status_code == 404
+    thumb = client.post("/api/shadow/abcdef0000cc/thumbnail", json={"theme": "night", "headline": "Tạm biệt"})
+    assert thumb.headers["content-type"] == "image/jpeg" and thumb.content[:2] == b"\xff\xd8"
+    assert client.post("/api/shadow/abcdef0000cc/thumbnail", json={"theme": "neon"}).status_code == 422
 
     body = {"title": "Bài YouTube", "description": "Mô tả", "tags": ["a", " "], "privacy": "unlisted"}
     assert client.post("/api/shadow/abcdef0000cc/youtube", json=body).status_code == 400   # chưa kết nối
@@ -289,8 +352,8 @@ def test_youtube_publish_flow(client, monkeypatch, tmp_path):
 
     seen = {}
 
-    def fake_upload(lesson, title, description, tags, privacy, publish_at, account_id, on_progress):
-        seen.update(title=title, tags=tags, privacy=privacy, publish_at=publish_at, lesson=lesson["id"])
+    def fake_upload(lesson, title, description, tags, privacy, publish_at, account_id, on_progress, thumb):
+        seen.update(title=title, tags=tags, privacy=privacy, publish_at=publish_at, lesson=lesson["id"], thumb=thumb)
         on_progress(1.0)
         return {"video_id": "VIDabc", "url": "https://youtu.be/VIDabc", "title": title, "privacy": "private",
                 "publish_at": youtube.to_utc(publish_at), "account": "me@example.com", "note": None}
@@ -301,6 +364,7 @@ def test_youtube_publish_flow(client, monkeypatch, tmp_path):
     job = wait_job(client, r.json()["job_id"])
     assert job["status"] == "done", job["error"]
     assert seen["tags"] == ["a"] and seen["lesson"] == "abcdef0000cc" and seen["publish_at"].tzinfo is not None
+    assert seen["thumb"] == {"theme": "coral", "headline": None, "quote": None}
     assert job["result"]["url"] == "https://youtu.be/VIDabc"
     lesson = next(s for s in client.get("/api/shadow").json() if s["id"] == "abcdef0000cc")
     assert lesson["youtube_url"] == "https://youtu.be/VIDabc"

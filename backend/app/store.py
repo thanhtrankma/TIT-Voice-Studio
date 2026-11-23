@@ -39,9 +39,12 @@ def init() -> None:
                 voice TEXT NOT NULL,
                 lines INTEGER NOT NULL,
                 duration REAL NOT NULL,
-                aspect TEXT NOT NULL
+                aspect TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'shadow'
             )"""
         )
+        if "kind" not in {r[1] for r in c.execute("PRAGMA table_info(shadow)")}:   # CSDL tạo trước khi có hội thoại
+            c.execute("ALTER TABLE shadow ADD COLUMN kind TEXT NOT NULL DEFAULT 'shadow'")
         c.execute(
             """CREATE TABLE IF NOT EXISTS youtube (
                 video_id TEXT PRIMARY KEY,
@@ -83,21 +86,24 @@ def delete_history(item_id: str) -> None:
         c.execute("DELETE FROM history WHERE id = ?", (item_id,))
 
 
-def add_shadow(item_id: str, title: str, voice: str, lines: int, duration: float, aspect: str) -> dict:
+def add_shadow(item_id: str, title: str, voice: str, lines: int, duration: float, aspect: str,
+               kind: str = "shadow") -> dict:
+    """Bài luyện Shadowing (kind="shadow") hoặc video hội thoại tiếng Trung (kind="dialogue")."""
     row = dict(id=item_id, created=time.time(), title=title, voice=voice,
-               lines=lines, duration=duration, aspect=aspect)
+               lines=lines, duration=duration, aspect=aspect, kind=kind)
     with _lock, _conn() as c:
-        c.execute("INSERT INTO shadow VALUES (:id, :created, :title, :voice, :lines, :duration, :aspect)", row)
+        c.execute("INSERT INTO shadow (id, created, title, voice, lines, duration, aspect, kind) "
+                  "VALUES (:id, :created, :title, :voice, :lines, :duration, :aspect, :kind)", row)
     return row
 
 
 _LATEST_UPLOAD = "(SELECT url FROM youtube y WHERE y.lesson_id = s.id ORDER BY uploaded DESC LIMIT 1) AS youtube_url"
 
 
-def list_shadow(limit: int = 100) -> List[dict]:
+def list_shadow(kind: str = "shadow", limit: int = 100) -> List[dict]:
     with _lock, _conn() as c:
-        rows = c.execute(f"SELECT s.*, {_LATEST_UPLOAD} FROM shadow s ORDER BY created DESC LIMIT ?",
-                         (limit,)).fetchall()
+        rows = c.execute(f"SELECT s.*, {_LATEST_UPLOAD} FROM shadow s WHERE kind = ? ORDER BY created DESC LIMIT ?",
+                         (kind, limit)).fetchall()
     return [dict(r) for r in rows]
 
 

@@ -12,7 +12,7 @@ from PIL import Image
 
 os.environ.setdefault("TIT_DATA_DIR", tempfile.mkdtemp(prefix="tit-qa-"))
 
-from app import shadow, store, youtube  # noqa: E402
+from app import shadow, store, thumbnail, youtube  # noqa: E402
 from app.shadow import Line, Settings  # noqa: E402
 
 DESKTOP = json.dumps({"installed": {"client_id": "x.apps.googleusercontent.com", "client_secret": "s"}}).encode()
@@ -83,6 +83,7 @@ def test_draft_is_within_youtube_limits():
     short = youtube.draft({**lesson, "title": "Du lịch", "lines": 3}, _timeline(3, 12.0))
     assert short["title"] == "Du lịch | Luyện nói tiếng Anh Shadowing"
     assert "1. Sentence 0 number 0.\n   Câu 0" in short["description"] and "Mục lục:" in short["description"]
+    assert short["thumbnail"] == {"theme": "coral", "headline": "Du lịch", "quote": "Sentence <0> number 0."}
 
 
 class FakeRequest:
@@ -146,7 +147,7 @@ def test_upload_retries_and_sets_thumbnail(lesson):
     progress = []
     when = datetime.now(timezone.utc) + timedelta(days=1)
     rec = youtube.upload(lesson, "Tiêu đề", "Mô tả", ["a" * 100] * 6, "public", when, "me@x.com",
-                         progress.append, service=svc)
+                         progress.append, {"theme": "ocean", "headline": "Chào hỏi", "quote": None}, service=svc)
     assert rec["url"] == "https://youtu.be/VID123" and rec["privacy"] == "private" and rec["note"] is None
     status = svc.body["status"]
     assert status["publishAt"] == youtube.to_utc(when) and status["containsSyntheticMedia"] is True
@@ -175,3 +176,22 @@ def test_store_links_latest_upload_to_lesson():
     store.add_youtube("abcdef0000bb", "V2", "https://youtu.be/V2", "Bài", "public", None, "me@x.com")
     assert store.get_shadow("abcdef0000bb")["youtube_url"] == "https://youtu.be/V2"
     assert [u["video_id"] for u in store.list_youtube("abcdef0000bb")] == ["V2", "V1"]
+
+
+def test_pick_quote_prefers_short_questions():
+    lines = [{"en": "I usually take the bus to work, but today I decided to walk."},
+             {"en": "Thanks."}, {"en": "I'm fine, thanks."}, {"en": "Could you help me with this?"}]
+    assert thumbnail.pick_quote(lines) == "Could you help me with this?"
+    assert thumbnail.pick_quote(lines[:3]) == "I'm fine, thanks."
+    assert thumbnail.pick_quote([{"en": "Hi."}]) == "Hi."
+    assert thumbnail._accent_word("Could you tell me more about this role?".split()) == 2   # "tell", bỏ hư từ
+
+
+@pytest.mark.parametrize("theme", list(thumbnail.THEMES))
+def test_thumbnail_renders_every_theme(tmp_path, theme):
+    lesson = {"title": "Phỏng vấn xin việc rất dài để thử tự co chữ", "lines": 12, "voice": "Heart (Mỹ)"}
+    tl = {"duration": 245, "lines": [{"en": "How long does it take to get to the city center?", "vi": "x"}]}
+    out = thumbnail.render(lesson, tl, tmp_path / "t.jpg", theme=theme)
+    with Image.open(out) as img:
+        assert img.size == (1280, 720) and img.format == "JPEG"
+    assert out.stat().st_size < 2_000_000   # YouTube nhận ảnh bìa tối đa 2 MB

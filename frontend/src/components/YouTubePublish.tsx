@@ -1,9 +1,10 @@
-import { CalendarClock, ExternalLink, FileJson, KeyRound, Loader2, Upload, UserPlus } from 'lucide-react'
+import { CalendarClock, Download, ExternalLink, FileJson, KeyRound, Loader2, Upload, UserPlus } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import {
   api,
   waitForJob,
   type ShadowLesson,
+  type ThumbnailOptions,
   type YouTubePrivacy,
   type YouTubeStatus,
   type YouTubeUpload,
@@ -15,6 +16,7 @@ const PRIVACY: { value: YouTubePrivacy; label: string }[] = [
   { value: 'unlisted', label: 'Không công khai' },
   { value: 'public', label: 'Công khai' },
 ]
+const THEME_LABEL: Record<string, string> = { coral: 'San hô', ocean: 'Đại dương', sunset: 'Hoàng hôn', night: 'Đêm' }
 const PRIVACY_LABEL = Object.fromEntries(PRIVACY.map((p) => [p.value, p.label])) as Record<YouTubePrivacy, string>
 
 /** "2026-10-28T20:00" cho ô datetime-local, theo giờ máy. */
@@ -38,6 +40,10 @@ export default function YouTubePublish({ lesson, onPublished }: Props) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [tags, setTags] = useState<string[]>([])
+  const [thumb, setThumb] = useState<ThumbnailOptions | null>(null)
+  const [themes, setThemes] = useState<Record<string, [string, string]>>({})
+  const [sentences, setSentences] = useState<string[]>([])
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null)
   const [privacy, setPrivacy] = useState<YouTubePrivacy>('private')
   const [schedule, setSchedule] = useState(false)
   const [publishAt, setPublishAt] = useState(tomorrowAt8pm)
@@ -53,14 +59,37 @@ export default function YouTubePublish({ lesson, onPublished }: Props) {
     api.youtube().then(setStatus).catch((e) => setError(e.message))
     api
       .shadowYoutube(lesson.id)
-      .then(({ draft, uploads }) => {
+      .then(({ draft, uploads, themes, sentences }) => {
         setTitle(draft.title)
         setDescription(draft.description)
         setTags(draft.tags)
+        setThumb(draft.thumbnail)
+        setThemes(themes)
+        setSentences(sentences)
         setUploads(uploads)
       })
       .catch((e) => setError(e.message))
   }, [lesson.id])
+
+  // Vẽ lại ảnh bìa xem trước sau khi ngừng gõ một chút.
+  useEffect(() => {
+    if (!thumb) return
+    let url: string | null = null
+    let cancelled = false
+    const timer = setTimeout(async () => {
+      try {
+        url = URL.createObjectURL(await api.thumbnail(lesson.id, thumb))
+        if (!cancelled) setThumbUrl(url)
+      } catch {
+        /* giữ ảnh cũ */
+      }
+    }, 350)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+      if (url) setTimeout(() => URL.revokeObjectURL(url!), 1000)
+    }
+  }, [lesson.id, thumb])
 
   // Đang chờ đăng nhập Google trong trình duyệt: hỏi lại đến khi có tài khoản hoặc báo lỗi.
   const waiting = status?.login.state === 'waiting'
@@ -99,6 +128,7 @@ export default function YouTubePublish({ lesson, onPublished }: Props) {
         title,
         description,
         tags,
+        thumbnail: thumb ?? { theme: 'coral', headline: '', quote: '' },
         privacy: schedule ? 'private' : privacy,
         publish_at: schedule ? new Date(publishAt).toISOString() : null,
         account: status.active || null,
@@ -125,9 +155,74 @@ export default function YouTubePublish({ lesson, onPublished }: Props) {
   const account = status.accounts.find((a) => a.id === status.active)
   const errorBox = error && <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
 
+  const thumbBlock = thumb && (
+    <div className="grid gap-4 rounded-2xl bg-canvas p-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <div className="relative aspect-video overflow-hidden rounded-xl bg-zinc-200">
+        {thumbUrl ? (
+          <img src={thumbUrl} alt="Ảnh bìa YouTube" className="size-full object-cover" />
+        ) : (
+          <div className="grid size-full place-items-center text-muted">
+            <Loader2 size={20} className="animate-spin" />
+          </div>
+        )}
+      </div>
+      <div className="space-y-3 text-sm">
+        <div className="flex items-center justify-between">
+          <span className="font-medium">Ảnh bìa</span>
+          {thumbUrl && (
+            <a
+              href={thumbUrl}
+              download={`tit-thumbnail-${lesson.id}.jpg`}
+              className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-muted hover:bg-white hover:text-ink"
+            >
+              <Download size={14} /> Tải ảnh
+            </a>
+          )}
+        </div>
+        <div className="flex gap-2">
+          {Object.entries(themes).map(([name, [from, to]]) => (
+            <button
+              key={name}
+              onClick={() => setThumb({ ...thumb, theme: name })}
+              className={`size-9 rounded-full ring-offset-2 transition ${thumb.theme === name ? 'ring-2 ring-ink' : 'hover:scale-105'}`}
+              style={{ background: `linear-gradient(135deg, ${from}, ${to})` }}
+              aria-label={`Tông màu ${THEME_LABEL[name] ?? name}`}
+              title={THEME_LABEL[name] ?? name}
+            />
+          ))}
+        </div>
+        <label className="block">
+          <span className="mb-1 block text-muted">Chữ lớn (chủ đề bài)</span>
+          <input
+            value={thumb.headline}
+            maxLength={40}
+            onChange={(e) => setThumb({ ...thumb, headline: e.target.value })}
+            className="w-full rounded-xl border border-line bg-white px-3 py-2 outline-none focus:border-brand-400"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-muted">Câu trích trong bong bóng</span>
+          <input
+            value={thumb.quote}
+            maxLength={90}
+            list={`quotes-${lesson.id}`}
+            onChange={(e) => setThumb({ ...thumb, quote: e.target.value })}
+            className="w-full rounded-xl border border-line bg-white px-3 py-2 outline-none focus:border-brand-400"
+          />
+          <datalist id={`quotes-${lesson.id}`}>
+            {sentences.map((s) => (
+              <option key={s} value={s} />
+            ))}
+          </datalist>
+        </label>
+      </div>
+    </div>
+  )
+
   if (!status.client_secret) {
     return (
       <div className="space-y-3 text-sm">
+        {thumbBlock}
         <h3 className="font-semibold">Kết nối YouTube (làm một lần)</h3>
         <ol className="list-decimal space-y-1 pl-5 text-muted">
           <li>
@@ -166,6 +261,7 @@ export default function YouTubePublish({ lesson, onPublished }: Props) {
   if (!status.accounts.length || waiting) {
     return (
       <div className="space-y-3 text-sm">
+        {thumbBlock}
         <h3 className="font-semibold">Kết nối tài khoản YouTube</h3>
         <p className="text-muted">
           Trình duyệt sẽ mở trang đăng nhập Google. Chọn kênh muốn đăng và cho phép quyền tải video lên.
@@ -214,6 +310,8 @@ export default function YouTubePublish({ lesson, onPublished }: Props) {
           </button>
         </div>
       </div>
+
+      {thumbBlock}
 
       <label className="block">
         <div className="mb-1 flex justify-between text-sm">
